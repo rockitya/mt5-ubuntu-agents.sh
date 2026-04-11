@@ -7,6 +7,11 @@ sudo dpkg --configure -a || true
 sudo apt-get remove --purge -y needrestart ufw firewalld >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
 
+# Kill the old conflicting service that was hogging port 3000
+sudo systemctl stop MetaTester-1.service 2>/dev/null || true
+sudo systemctl disable MetaTester-1.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/MetaTester-1.service 2>/dev/null || true
+
 echo "==> [2/6] Installing WineHQ & Xvfb (Virtual Display)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
@@ -19,11 +24,9 @@ sudo rm -rf $WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [4/6] Downloading & Extracting MetaTrader 5 silently..."
-# Removed -q so you can see the download progress bar
 wget -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 
 echo "    Launching installer in background..."
-# Added an '&' at the end to prevent the Windows installer from freezing the script
 xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
 
 echo "    Waiting 60 seconds for background extraction to finish..."
@@ -34,6 +37,7 @@ if [ ! -f "$EX" ]; then
     echo "ERROR: metatester64.exe failed to extract. The silent installer crashed."
     exit 1
 fi
+
 echo "==> [5/6] Registering MetaTester Agents across all CPU cores..."
 PW="MetaTester"
 SP=3000
@@ -43,10 +47,15 @@ EP=$((SP + CORES - 1))
 echo "    Found $CORES CPU cores. Configuring ports $SP to $EP..."
 
 for P in $(seq $SP $EP); do
+    echo "    -> Configuring Agent on port $P..."
+    
+    # Stop existing service if it exists to avoid conflicts
+    sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true
+    
     # Register the agent in Wine
     xvfb-run -a wine "$EX" /install /address:0.0.0.0:$P /password:$PW >/dev/null 2>&1
     
-    # Create persistent SystemD service for each port
+    # Create persistent SystemD service with EXACT port and password arguments
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -55,7 +64,7 @@ After=network.target
 [Service]
 Environment=WINEPREFIX=$WP
 Environment=WINEARCH=win64
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$EX" /run
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$EX" /address:0.0.0.0:$P /password:$PW
 Restart=always
 RestartSec=5
 
@@ -69,7 +78,7 @@ EOF
 done
 
 echo "==> [6/6] Finalizing..."
-sleep 4
+sleep 5
 
 echo ""
 echo "========================================="
