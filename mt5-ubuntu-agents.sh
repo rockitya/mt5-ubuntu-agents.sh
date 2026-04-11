@@ -19,18 +19,21 @@ sudo rm -rf $WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [4/6] Downloading & Extracting MetaTrader 5 silently..."
-wget -qO /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
-xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1
+# Removed -q so you can see the download progress bar
+wget -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 
-echo "    Waiting 45 seconds for background extraction to finish..."
-sleep 45
+echo "    Launching installer in background..."
+# Added an '&' at the end to prevent the Windows installer from freezing the script
+xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
+
+echo "    Waiting 60 seconds for background extraction to finish..."
+sleep 60
 
 EX="$WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 if [ ! -f "$EX" ]; then
     echo "ERROR: metatester64.exe failed to extract. The silent installer crashed."
     exit 1
 fi
-
 echo "==> [5/6] Registering MetaTester Agents across all CPU cores..."
 PW="MetaTester"
 SP=3000
