@@ -1,8 +1,17 @@
 #!/bin/bash
 set -e
 
-# Accept the number of cores as an argument, or default to all available cores
+# Accept arguments:
+# $1 = Number of cores
+# $2 = MQL5 Account Email or Username
 REQUESTED_CORES=${1:-$(nproc)}
+MQL5_ACCOUNT=${2:-""}
+
+if [ -z "$MQL5_ACCOUNT" ]; then
+    echo "ERROR: You must provide your MQL5 account email/username to sell computing resources!"
+    echo "Usage: wget -qO- YOUR_URL | sudo bash -s -- CORES MQL5_EMAIL"
+    exit 1
+fi
 
 echo "==> [1/6] Preparing Ubuntu & Removing Firewall..."
 export DEBIAN_FRONTEND=noninteractive
@@ -39,15 +48,16 @@ if [ ! -f "$MASTER_EX" ]; then
 fi
 echo "    -> Download complete! No installation required."
 
-echo "==> [5/6] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
+echo "==> [5/6] Isolating & Configuring MetaTester Agents for Cloud Network..."
 PW="MetaTester"
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
-echo "    Creating isolated environments for ports $SP to $EP..."
+echo "    Creating isolated environments for $REQUESTED_CORES cores..."
+echo "    Binding agents to MQL5 Account: $MQL5_ACCOUNT"
 
 for P in $(seq $SP $EP); do
-    echo "    -> Cloning environment for Agent on port $P..."
+    echo "    -> Configuring Agent on port $P for MQL5 Cloud..."
     AGENT_WP="/opt/mt5agent-$P"
     
     sudo rm -rf "$AGENT_WP"
@@ -55,10 +65,11 @@ for P in $(seq $SP $EP); do
     
     AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
-    # NOTE: We skip the buggy /install step entirely. We don't need Windows to install the 
-    # background service because Linux (SystemD) is handling the background service for us!
+    # NOTE: The /account flag automatically enables "Sell computing resources" for the specified MQL5 email.
+    # The /password flag sets your local password, and /address sets the port.
+    WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW /account:$MQL5_ACCOUNT >/dev/null 2>&1
     
-    # Create persistent Linux SystemD service to run the exe directly
+    # Create persistent SystemD service
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -67,7 +78,7 @@ After=network.target
 [Service]
 Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW /account:$MQL5_ACCOUNT
 Restart=always
 RestartSec=5
 
@@ -87,9 +98,11 @@ sleep 6
 
 echo ""
 echo "========================================="
-echo "✓ SUCCESS! Agents active on the following ports:"
+echo "✓ SUCCESS! Agents configured for MQL5 Cloud Network."
+echo "Active Ports:"
 ss -tuln | grep -E "30[0-9]{2}|3100" | awk '{print $5}'
 echo "========================================="
-echo "VPS IP  : $(hostname -I | awk '{print $1}')"
-echo "Password: $PW"
-echo "Add these IPs and ports in your MT5 terminal: Tools -> Options -> Expert Advisors -> Add Agent"
+echo "VPS IP        : $(hostname -I | awk '{print $1}')"
+echo "Local Password: $PW"
+echo "MQL5 Account  : $MQL5_ACCOUNT"
+echo "Your agents will now automatically sell computing power to the Cloud Network!"
