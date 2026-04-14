@@ -27,7 +27,6 @@ sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [4/6] Downloading Portable MetaTester64 directly..."
-# We completely skip installers and download your raw, portable executable directly
 mkdir -p "$MASTER_WP/drive_c/Program Files/MetaTrader 5/"
 MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
@@ -56,10 +55,10 @@ for P in $(seq $SP $EP); do
     
     AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
-    # Register the agent silently inside its isolated folder
-    WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW >/dev/null 2>&1
+    # NOTE: We skip the buggy /install step entirely. We don't need Windows to install the 
+    # background service because Linux (SystemD) is handling the background service for us!
     
-    # Create persistent SystemD service
+    # Create persistent Linux SystemD service to run the exe directly
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
