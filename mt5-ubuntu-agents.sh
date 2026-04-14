@@ -27,19 +27,8 @@ sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [4/7] Downloading & Extracting Master MetaTrader 5 silently..."
-
-# Spoofing Google Chrome on Windows to bypass MetaQuotes CDN firewall blocks
-wget --no-check-certificate \
-     --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36" \
-     --header="Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
-     --header="Accept-Language: en-US,en;q=0.9" \
-     --header="Sec-Fetch-Dest: document" \
-     --header="Sec-Fetch-Mode: navigate" \
-     --header="Sec-Fetch-Site: none" \
-     --header="Sec-Fetch-User: ?1" \
-     --header="Upgrade-Insecure-Requests: 1" \
-     --referer="https://www.metatrader5.com/" \
-     -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+# Downloading from your personal GitHub repository
+wget -O /tmp/mt5setup.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5setup%20(6).exe"
 
 xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
 
