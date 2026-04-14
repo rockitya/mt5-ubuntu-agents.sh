@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Accept the number of cores as an argument, or default to all available cores
+REQUESTED_CORES=${1:-$(nproc)}
+
 echo "==> [1/6] Preparing Ubuntu & Removing Firewall..."
 export DEBIAN_FRONTEND=noninteractive
 sudo dpkg --configure -a || true
@@ -36,28 +39,26 @@ if [ ! -f "$MASTER_EX" ]; then
     exit 1
 fi
 
-echo "==> [5/6] Isolating MetaTester Agents across all CPU cores..."
+echo "==> [5/6] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
 PW="MetaTester"
 SP=3000
-CORES=$(nproc)
-EP=$((SP + CORES - 1))
+EP=$((SP + REQUESTED_CORES - 1))
 
-echo "    Found $CORES CPU cores. Creating isolated environments for ports $SP to $EP..."
+echo "    Creating isolated environments for ports $SP to $EP..."
 
 for P in $(seq $SP $EP); do
     echo "    -> Cloning environment for Agent on port $P..."
     AGENT_WP="/opt/mt5agent-$P"
     
-    # 1. Create a fully isolated copy of the Master Wine prefix for this specific port
+    sudo rm -rf "$AGENT_WP"
     sudo cp -r "$MASTER_WP" "$AGENT_WP"
     
-    # The path to the executable inside this specific isolated prefix
     AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
-    # 2. Register the agent silently inside its own isolated environment
+    # Register the agent silently
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW >/dev/null 2>&1
     
-    # 3. Create persistent SystemD service bound strictly to this isolated prefix
+    # Create persistent SystemD service
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
