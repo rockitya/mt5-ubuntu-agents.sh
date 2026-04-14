@@ -12,7 +12,7 @@ if [ -z "$CORES" ] || [ -z "$PASSWORD" ]; then
 fi
 
 echo "========================================================="
-echo "      MetaTester 5 Setup (Fixing Wine Installation)      "
+echo "      MetaTester 5 Setup (Background Detach Fix)         "
 echo "========================================================="
 echo "Cores: $CORES | MQL5 Login: ${MQL5_LOGIN:-None}"
 
@@ -24,12 +24,10 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
-# FIX 1: Unhidden the output so we can see if it succeeds.
-# FIX 2: Added 'wine' and 'net-tools' to the install list.
-echo "Installing Wine and dependencies (Output is visible to ensure success)..."
+echo "Installing Wine and dependencies..."
 sudo dpkg --add-architecture i386
-sudo -E apt-get update -y
-sudo -E apt-get install -y wine wine64 wine32 xvfb wget winbind net-tools
+sudo -E apt-get update -y > /dev/null 2>&1
+sudo -E apt-get install -y wine wine64 wine32 xvfb wget winbind net-tools > /dev/null 2>&1
 
 DIR="$HOME/mt5-agents"
 mkdir -p "$DIR"
@@ -41,7 +39,7 @@ wget -q -nc -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-
 export WINEPREFIX="$DIR/wine_env"
 export WINEDEBUG=-all
 
-# Stop any stuck old processes
+# Stop any stuck old processes from the previous run
 killall -9 Xvfb wineserver metatester64.exe 2>/dev/null
 sleep 2
 
@@ -53,8 +51,7 @@ sleep 2
 nohup wineserver -p > /dev/null 2>&1 &
 sleep 2
 
-# This will now execute perfectly
-wineboot -u
+wineboot -u > /dev/null 2>&1
 sleep 5
 
 if [ ! -z "$MQL5_LOGIN" ]; then
@@ -76,11 +73,16 @@ for i in $(seq 1 $CORES); do
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
     fi
     
-    echo "Installing Agent on port $PORT..."
-    wine metatester64.exe /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
-    sleep 2
+    echo "Installing and Detaching Agent on port $PORT..."
     
-    echo "✅ Agent is running on port $PORT"
+    # FIX: Added 'nohup' and '&' at the end. 
+    # This pushes the active agent into the background so the script doesn't pause!
+    nohup wine metatester64.exe /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1 &
+    
+    # Wait 5 seconds for the agent to fully boot before starting the next core
+    sleep 5
+    
+    echo "✅ Agent is running in background on port $PORT"
 done
 
 echo "---------------------------------------------------------"
@@ -89,6 +91,6 @@ sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 
 echo "========================================================="
 echo "Setup Complete! Agents are actively running."
-echo "To verify they are listening, copy and paste this command:"
+echo "To verify they are listening, run this command:"
 echo "sudo netstat -tulnp | grep wineserver"
 echo "========================================================="
