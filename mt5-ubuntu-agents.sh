@@ -18,7 +18,7 @@ for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/nu
 echo "==> [2/7] Installing WineHQ & Xvfb (Virtual Display)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
-sudo apt-get install -y wine32 wine64 xvfb wget cabextract ca-certificates >/dev/null 2>&1
+sudo apt-get install -y wine32 wine64 xvfb wget cabextract >/dev/null 2>&1
 
 echo "==> [3/7] Initializing Master 64-bit Wine Prefix..."
 MASTER_WP="/opt/mt5master"
@@ -26,20 +26,25 @@ export WINEPREFIX=$MASTER_WP WINEARCH=win64 DISPLAY=:99
 sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
-echo "==> [4/7] Downloading & Extracting Master MetaTrader 5 silently..."
-# Downloading from your personal GitHub repository
-wget -O /tmp/mt5setup.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5setup%20(6).exe"
-
-xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
+echo "==> [4/7] Downloading & Extracting Master MetaTester silently..."
+# Downloading the exact mt5tester setup file from your GitHub
+wget -O /tmp/mt5testersetup.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5tester.setup%20(1).exe"
+xvfb-run -a wine /tmp/mt5testersetup.exe /auto >/dev/null 2>&1 &
 
 echo "    Waiting 60 seconds for background extraction to finish..."
 sleep 60
 
-MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
-if [ ! -f "$MASTER_EX" ]; then
+# Dynamically find the extracted executable in case the standalone tester uses a different folder
+MASTER_EX=$(find "$MASTER_WP/drive_c" -name "metatester64.exe" | head -n 1)
+
+if [ -z "$MASTER_EX" ]; then
     echo "ERROR: metatester64.exe failed to extract."
     exit 1
 fi
+echo "    Found executable at: $MASTER_EX"
+
+# Get relative path so we can perfectly clone it to isolated agent folders
+RELATIVE_EX="${MASTER_EX#$MASTER_WP}"
 
 echo "==> [5/7] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
 PW="MetaTester"
@@ -55,7 +60,8 @@ for P in $(seq $SP $EP); do
     sudo rm -rf "$AGENT_WP"
     sudo cp -r "$MASTER_WP" "$AGENT_WP"
     
-    AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
+    # Map the dynamically found executable path to the newly cloned prefix
+    AGENT_EX="$AGENT_WP$RELATIVE_EX"
 
     # Register the agent silently inside its isolated folder
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW >/dev/null 2>&1
@@ -83,9 +89,7 @@ EOF
 done
 
 echo "==> [6/7] One-time RAM cleanup (Removing old cron loops)..."
-# Delete the old 3-minute loop if it exists so it stops using CPU
 sudo rm -f /etc/cron.d/clear-mt5-cache 2>/dev/null || true
-# Perform a single flush of the RAM cache generated during installation
 sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
 echo "==> [7/7] Finalizing..."
