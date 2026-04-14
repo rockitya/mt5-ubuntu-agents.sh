@@ -39,21 +39,15 @@ for i in $(seq 1 $CORES); do
     PORT=$((START_PORT + i - 1))
     DIR="$HOME/mt5-agents/node_$PORT"
     
-    echo "Configuring Agent on port $PORT (Takes ~10 seconds)..."
+    echo "Starting Agent on port $PORT in the background..."
     mkdir -p "$DIR"
     cp metatester64.exe "$DIR/"
     
     ACCOUNT_FLAG=""
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
-    fi
-    
-    # FIX: Use 'timeout 10' to forcefully cut off the hanging /install command
-    # It creates the config instantly, then hangs trying to start the service.
-    WINEPREFIX="$DIR" WINEDEBUG=-all timeout 10 xvfb-run -a wine "$DIR/metatester64.exe" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
-    
-    # Inject Registry key for "Sell computing resources"
-    if [ ! -z "$MQL5_LOGIN" ]; then
+        
+        # Inject Registry key for "Sell computing resources" BEFORE starting the agent
         cat <<REG > "$DIR/cloud.reg"
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
@@ -63,15 +57,18 @@ REG
         WINEPREFIX="$DIR" WINEDEBUG=-all xvfb-run -a wine regedit "$DIR/cloud.reg" > /dev/null 2>&1
     fi
     
-    WINEPREFIX="$DIR" wineserver -k > /dev/null 2>&1
+    # Kill any old crashed sessions on this port
+    tmux kill-session -t "agent_$PORT" 2>/dev/null
+    
+    # FIX: Run the install/start command DIRECTLY inside the detached tmux session.
+    # This prevents the script from pausing, and keeps the agent alive permanently.
+    tmux new-session -d -s "agent_$PORT" "WINEPREFIX=\"$DIR\" WINEDEBUG=-all xvfb-run -a wine \"$DIR/metatester64.exe\" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG"
+    
     sleep 2
-    
-    tmux new-session -d -s "agent_$PORT" "WINEPREFIX=\"$DIR\" WINEDEBUG=-all xvfb-run -a wineboot && WINEPREFIX=\"$DIR\" wineserver -w"
-    
     echo "✅ Agent running natively on port $PORT"
 done
 
-# Run RAM Cleanup AFTER installation
+# Run RAM Cleanup AFTER everything is launched
 echo "---------------------------------------------------------"
 echo "Cleaning up RAM Cache..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
