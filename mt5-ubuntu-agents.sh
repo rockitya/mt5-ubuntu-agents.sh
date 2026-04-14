@@ -62,24 +62,15 @@ for P in $(seq $SP $EP); do
     
     sudo rm -rf "$AGENT_WP"
     sudo cp -r "$MASTER_WP" "$AGENT_WP"
-    
     AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
-    CONFIG_DIR="$AGENT_WP/drive_c/Program Files/MetaTrader 5/tester"
-    sudo mkdir -p "$CONFIG_DIR"
 
-    # DIRECT CONFIGURATION INJECTION
-    # Instead of running the hanging installer, we forcefully write the configuration
-    # file that automatically checks the MQL5 Cloud Network boxes and sets the port!
-    cat << EOF | sudo tee "$CONFIG_DIR/tester.ini" >/dev/null
-[Tester]
-Port=$P
-Password=$PW
-MQL5Login=$MQL5_ACCOUNT
-CloudEnable=1
-CloudSell=1
-EOF
-
-    # Create persistent SystemD service to run the agent directly using the config file
+    # THE FIX: We use 'timeout' to run the official installation command for exactly 10 seconds.
+    # This is enough time for metatester64.exe to securely generate its own tester.ini file,
+    # bind to your MQL5 account, and enable Cloud Selling before it hangs. Then we kill it.
+    timeout 10 xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW /account:$MQL5_ACCOUNT >/dev/null 2>&1 || true
+    
+    # Create persistent SystemD service. Notice we use the /run flag now because the configuration 
+    # file was officially created by the executable itself in the step above!
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -88,8 +79,7 @@ After=network.target
 [Service]
 Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
-# Launch the agent directly and tell it to use the configuration file we just injected
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /config:"C:\\Program Files\\MetaTrader 5\\tester\\tester.ini"
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /run
 Restart=always
 RestartSec=5
 
@@ -105,7 +95,7 @@ done
 echo "==> [6/6] Finalizing & RAM cleanup..."
 sudo rm -f /etc/cron.d/clear-mt5-cache 2>/dev/null || true
 sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-sleep 6
+sleep 8
 
 echo ""
 echo "========================================="
