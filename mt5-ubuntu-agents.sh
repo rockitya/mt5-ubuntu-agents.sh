@@ -64,12 +64,22 @@ for P in $(seq $SP $EP); do
     sudo cp -r "$MASTER_WP" "$AGENT_WP"
     
     AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
+    CONFIG_DIR="$AGENT_WP/drive_c/Program Files/MetaTrader 5/tester"
+    sudo mkdir -p "$CONFIG_DIR"
 
-    # NOTE: The /account flag automatically enables "Sell computing resources" for the specified MQL5 email.
-    # The /password flag sets your local password, and /address sets the port.
-    WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW /account:$MQL5_ACCOUNT >/dev/null 2>&1
-    
-    # Create persistent SystemD service
+    # DIRECT CONFIGURATION INJECTION
+    # Instead of running the hanging installer, we forcefully write the configuration
+    # file that automatically checks the MQL5 Cloud Network boxes and sets the port!
+    cat << EOF | sudo tee "$CONFIG_DIR/tester.ini" >/dev/null
+[Tester]
+Port=$P
+Password=$PW
+MQL5Login=$MQL5_ACCOUNT
+CloudEnable=1
+CloudSell=1
+EOF
+
+    # Create persistent SystemD service to run the agent directly using the config file
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -78,7 +88,8 @@ After=network.target
 [Service]
 Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW /account:$MQL5_ACCOUNT
+# Launch the agent directly and tell it to use the configuration file we just injected
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /config:"C:\\Program Files\\MetaTrader 5\\tester\\tester.ini"
 Restart=always
 RestartSec=5
 
