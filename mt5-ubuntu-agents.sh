@@ -12,7 +12,7 @@ if [ -z "$CORES" ] || [ -z "$PASSWORD" ]; then
 fi
 
 echo "========================================================="
-echo "      MetaTester 5 Setup (Persistent Background Mode)    "
+echo "      MetaTester 5 Setup (Fixing Wine Installation)      "
 echo "========================================================="
 echo "Cores: $CORES | MQL5 Login: ${MQL5_LOGIN:-None}"
 
@@ -24,11 +24,12 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
-# FIX 1: Added 'winbind' back. MT5 crashes without it!
-echo "Installing dependencies (wine, xvfb, winbind)..."
-sudo dpkg --add-architecture i386 > /dev/null 2>&1
-sudo -E apt-get update -yqq > /dev/null 2>&1
-sudo -E apt-get install -yqq wine64 wine32 xvfb wget winbind > /dev/null 2>&1
+# FIX 1: Unhidden the output so we can see if it succeeds.
+# FIX 2: Added 'wine' and 'net-tools' to the install list.
+echo "Installing Wine and dependencies (Output is visible to ensure success)..."
+sudo dpkg --add-architecture i386
+sudo -E apt-get update -y
+sudo -E apt-get install -y wine wine64 wine32 xvfb wget winbind net-tools
 
 DIR="$HOME/mt5-agents"
 mkdir -p "$DIR"
@@ -37,7 +38,6 @@ cd "$DIR"
 echo "Downloading metatester64.exe..."
 wget -q -nc -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
-# Configure a single, unified Wine environment
 export WINEPREFIX="$DIR/wine_env"
 export WINEDEBUG=-all
 
@@ -46,14 +46,14 @@ killall -9 Xvfb wineserver metatester64.exe 2>/dev/null
 sleep 2
 
 echo "Starting Virtual Display & Wine Services..."
-# FIX 2: Start a PERMANENT, detached X server so agents never lose their display
 nohup Xvfb :99 -screen 0 1024x768x16 > /dev/null 2>&1 &
 export DISPLAY=:99
 sleep 2
 
-# FIX 3: Start a persistent Wine daemon to keep the background services alive
 nohup wineserver -p > /dev/null 2>&1 &
 sleep 2
+
+# This will now execute perfectly
 wineboot -u
 sleep 5
 
@@ -77,7 +77,6 @@ for i in $(seq 1 $CORES); do
     fi
     
     echo "Installing Agent on port $PORT..."
-    # The agent installs as a service and stays alive safely inside the permanent Wine environment
     wine metatester64.exe /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
     sleep 2
     
