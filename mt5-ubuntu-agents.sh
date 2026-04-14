@@ -12,7 +12,7 @@ if [ -z "$CORES" ] || [ -z "$PASSWORD" ]; then
 fi
 
 echo "========================================================="
-echo "      MetaTester 5 Setup (Final Application Mode)        "
+echo "      MetaTester 5 Setup (Native Service Architecture)   "
 echo "========================================================="
 echo "Cores: $CORES | MQL5 Login: ${MQL5_LOGIN:-None}"
 
@@ -24,19 +24,19 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
-echo "Installing required packages (wine, xvfb, winbind, tmux)..."
+# Notice tmux is removed entirely from dependencies
+echo "Installing required packages (wine, xvfb, winbind, net-tools)..."
 sudo dpkg --add-architecture i386 > /dev/null 2>&1
 sudo -E apt-get update -yqq > /dev/null 2>&1
-sudo -E apt-get install -yqq wine wine64 wine32 xvfb wget winbind net-tools tmux > /dev/null 2>&1
+sudo -E apt-get install -yqq wine wine64 wine32 xvfb wget winbind net-tools > /dev/null 2>&1
 
 echo "Downloading official metatester64.exe..."
 mkdir -p ~/mt5-agents
 cd ~/mt5-agents
 wget -q -nc -O metatester64.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/metatester64.exe"
 
-# Stop all old processes and clear out old tmux sessions
-killall -9 wineserver metatester64.exe wine 2>/dev/null
-for i in $(tmux ls | awk -F: '{print $1}'); do tmux kill-session -t "$i"; done
+echo "Clearing old configurations..."
+killall -9 wineserver metatester64.exe wine Xvfb 2>/dev/null
 sleep 2
 
 START_PORT=3000
@@ -45,36 +45,52 @@ for i in $(seq 1 $CORES); do
     PORT=$((START_PORT + i - 1))
     DIR="$HOME/mt5-agents/node_$PORT"
     export WINEPREFIX="$DIR"
+    export WINEDEBUG=-all
     
-    echo "Configuring and starting Agent Application on port $PORT..."
+    echo "Configuring and starting Agent on port $PORT..."
     
-    # Rebuild fresh directories for each agent
     rm -rf "$DIR"
     mkdir -p "$DIR"
     cp metatester64.exe "$DIR/"
     
-    # Pre-boot the Wine environment so it generates standard folders
-    xvfb-run -a wineboot -u > /dev/null 2>&1
+    # 1. Create a dedicated virtual display for this specific agent to prevent crashes
+    nohup Xvfb :$PORT -screen 0 1024x768x16 > /dev/null 2>&1 &
+    export DISPLAY=:$PORT
+    sleep 1
+    
+    # 2. Pre-boot the Wine environment
+    wineboot -u > /dev/null 2>&1
     sleep 2
     
     ACCOUNT_FLAG=""
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
         
-        # Inject Cloud Network Registry BEFORE starting the application to force the "Sell" feature
+        # Inject Cloud Network Registry
         cat <<REG > "$DIR/cloud.reg"
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
 "Login"="$MQL5_LOGIN"
 "SellComputingResources"=dword:00000001
 REG
-        xvfb-run -a wine regedit "$DIR/cloud.reg" > /dev/null 2>&1
+        wine regedit "$DIR/cloud.reg" > /dev/null 2>&1
     fi
     
-    # Run the application directly inside tmux
-    tmux new-session -d -s "agent_$PORT" "WINEPREFIX=\"$DIR\" WINEDEBUG=-all xvfb-run -a wine \"$DIR/metatester64.exe\" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG"
+    # 3. INSTALL the application as a background Windows Service
+    wine "$DIR/metatester64.exe" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
     
-    echo "✅ Application running safely in background (tmux session: agent_$PORT)"
+    # 4. Force-kill the temporary installation daemon
+    wineserver -k > /dev/null 2>&1
+    sleep 2
+    
+    # 5. START the persistent daemon. '-p' keeps the wine background alive forever.
+    nohup wineserver -p > /dev/null 2>&1 &
+    sleep 2
+    
+    # 6. Boot the services. This natively turns ON the MetaTester service in the background!
+    nohup wineboot > /dev/null 2>&1 &
+    
+    echo "✅ Agent successfully started in background on port $PORT"
     sleep 2
 done
 
@@ -84,8 +100,6 @@ sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 
 echo "========================================================="
 echo "Setup Complete!"
-echo "Check your ports using: sudo netstat -tulnp | grep wineserver"
-if [ ! -z "$MQL5_LOGIN" ]; then
-    echo "Note: It can take 15-20 minutes for new agents to appear on your MQL5 Cloud profile."
-fi
+echo "Check your active listening ports using:"
+echo "sudo netstat -tulnp | grep wineserver"
 echo "========================================================="
