@@ -12,35 +12,42 @@ if [ -z "$CORES" ] || [ -z "$PASSWORD" ]; then
 fi
 
 echo "========================================================="
-echo "      MetaTester 5 Setup (tmux headless + MQL5 Cloud)    "
+echo "      MetaTester 5 Setup (Fully Automatic & Headless)    "
 echo "========================================================="
 echo "Cores: $CORES | MQL5 Login: ${MQL5_LOGIN:-None}"
 
-# 1. One-Time RAM Cleanup
+# 1. Disable the Firewall completely
+echo "---------------------------------------------------------"
+echo "Disabling UFW Firewall..."
+sudo ufw disable
+
+# 2. Block all interactive popups (Kernel Upgrades/Restarts)
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
+# 3. One-Time RAM Cleanup
 echo "---------------------------------------------------------"
 echo "Cleaning up RAM Cache..."
 sudo sync; sudo sysctl -w vm.drop_caches=3
 
-# 2. Install Dependencies
+# 4. Install Dependencies (Silently)
 echo "---------------------------------------------------------"
-echo "Installing Wine and dependencies..."
+echo "Installing Wine and dependencies (This may take a minute)..."
 sudo dpkg --add-architecture i386
-sudo apt update
-sudo apt install -y wine64 wine32 xvfb tmux wget ufw
+sudo -E apt-get update -yq
+sudo -E apt-get install -yq wine64 wine32 xvfb tmux wget ufw
 
-START_PORT=3000
-END_PORT=$((START_PORT + CORES - 1))
-sudo ufw allow $START_PORT:$END_PORT/tcp
-
-# 3. Download metatester64.exe
+# 5. Download metatester64.exe
 echo "---------------------------------------------------------"
 mkdir -p ~/mt5-agents
 cd ~/mt5-agents
-echo "Downloading metatester64.exe from github.com/rockitya..."
-wget -nc -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
+echo "Downloading metatester64.exe..."
+wget -q -nc -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
-# 4. Build Agent Nodes
+# 6. Build Agent Nodes
 echo "---------------------------------------------------------"
+START_PORT=3000
 for i in $(seq 1 $CORES); do
     PORT=$((START_PORT + i - 1))
     DIR="$HOME/mt5-agents/node_$PORT"
@@ -54,7 +61,7 @@ for i in $(seq 1 $CORES); do
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
     fi
     
-    WINEPREFIX="$DIR" WINEDEBUG=-all xvfb-run -a wine "$DIR/metatester64.exe" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG
+    WINEPREFIX="$DIR" WINEDEBUG=-all xvfb-run -a wine "$DIR/metatester64.exe" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
     
     # Inject Registry key for "Sell computing resources"
     if [ ! -z "$MQL5_LOGIN" ]; then
@@ -64,17 +71,18 @@ Windows Registry Editor Version 5.00
 "Login"="$MQL5_LOGIN"
 "SellComputingResources"=dword:00000001
 REG
-        WINEPREFIX="$DIR" WINEDEBUG=-all xvfb-run -a wine regedit "$DIR/cloud.reg"
+        WINEPREFIX="$DIR" WINEDEBUG=-all xvfb-run -a wine regedit "$DIR/cloud.reg" > /dev/null 2>&1
     fi
     
-    WINEPREFIX="$DIR" wineserver -k
+    WINEPREFIX="$DIR" wineserver -k > /dev/null 2>&1
     sleep 2
     
     tmux new-session -d -s "agent_$PORT" "WINEPREFIX=\"$DIR\" WINEDEBUG=-all xvfb-run -a wineboot && WINEPREFIX=\"$DIR\" wineserver -w"
     
-    echo "✅ Agent running natively on port $PORT (tmux session: agent_$PORT)"
+    echo "✅ Agent running natively on port $PORT"
 done
 
 echo "========================================================="
 echo "Setup Complete! $CORES Agents are running in the background."
+echo "Firewall is OFF. Kernel popups were bypassed."
 echo "========================================================="
