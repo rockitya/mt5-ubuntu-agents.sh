@@ -4,7 +4,7 @@ set -e
 # Accept the number of cores as an argument, or default to all available cores
 REQUESTED_CORES=${1:-$(nproc)}
 
-echo "==> [1/7] Preparing Ubuntu & Removing Firewall..."
+echo "==> [1/6] Preparing Ubuntu & Removing Firewall..."
 export DEBIAN_FRONTEND=noninteractive
 sudo dpkg --configure -a || true
 sudo apt-get remove --purge -y needrestart ufw firewalld >/dev/null 2>&1 || true
@@ -15,40 +15,32 @@ sudo systemctl stop MetaTester-1.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/MetaTester-1.service 2>/dev/null || true
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; done
 
-echo "==> [2/7] Installing WineHQ & Xvfb (Virtual Display)..."
+echo "==> [2/6] Installing WineHQ & Xvfb (Virtual Display)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
 sudo apt-get install -y wine32 wine64 xvfb wget cabextract >/dev/null 2>&1
 
-echo "==> [3/7] Initializing Master 64-bit Wine Prefix..."
+echo "==> [3/6] Initializing Master 64-bit Wine Prefix..."
 MASTER_WP="/opt/mt5master"
 export WINEPREFIX=$MASTER_WP WINEARCH=win64 DISPLAY=:99
 sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
-echo "==> [4/7] Downloading & Extracting Master MetaTester silently..."
-# Bypassing the blocked CDN by using the official terminal.free Cloud Network link
-wget --no-check-certificate -qO /tmp/mt5testersetup.exe "https://download.terminal.free/cdn/web/metaquotes.software.corp/mt5/mt5tester.setup.exe"
+echo "==> [4/6] Downloading Portable MetaTester64 directly..."
+# We completely skip installers and download your raw, portable executable directly
+mkdir -p "$MASTER_WP/drive_c/Program Files/MetaTrader 5/"
+MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
-# Launch the headless installer
-xvfb-run -a wine /tmp/mt5testersetup.exe /auto >/dev/null 2>&1 &
+# Downloading the actual executable from your GitHub repo
+wget -qO "$MASTER_EX" "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
-echo "    Waiting 60 seconds for background extraction to finish..."
-sleep 60
-
-# Dynamically search the virtual C: drive for the extracted executable
-MASTER_EX=$(find "$MASTER_WP/drive_c" -name "metatester64.exe" 2>/dev/null | head -n 1)
-
-if [ -z "$MASTER_EX" ]; then
-    echo "ERROR: metatester64.exe failed to extract."
+if [ ! -f "$MASTER_EX" ]; then
+    echo "ERROR: Failed to download metatester64.exe from GitHub."
     exit 1
 fi
-echo "    -> Extraction complete! Found executable at: $MASTER_EX"
+echo "    -> Download complete! No installation required."
 
-# Get relative path so we can clone it to isolated agent folders
-RELATIVE_EX="${MASTER_EX#$MASTER_WP}"
-
-echo "==> [5/7] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
+echo "==> [5/6] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
 PW="MetaTester"
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
@@ -62,8 +54,7 @@ for P in $(seq $SP $EP); do
     sudo rm -rf "$AGENT_WP"
     sudo cp -r "$MASTER_WP" "$AGENT_WP"
     
-    # Map the dynamically found executable path to the newly cloned prefix
-    AGENT_EX="$AGENT_WP$RELATIVE_EX"
+    AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
     # Register the agent silently inside its isolated folder
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW >/dev/null 2>&1
@@ -90,11 +81,9 @@ EOF
     sudo systemctl restart mt5-agent-$P.service
 done
 
-echo "==> [6/7] One-time RAM cleanup (Removing old cron loops)..."
+echo "==> [6/6] Finalizing & RAM cleanup..."
 sudo rm -f /etc/cron.d/clear-mt5-cache 2>/dev/null || true
 sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-
-echo "==> [7/7] Finalizing..."
 sleep 6
 
 echo ""
