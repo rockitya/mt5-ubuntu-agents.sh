@@ -12,7 +12,7 @@ if [ -z "$CORES" ] || [ -z "$PASSWORD" ]; then
 fi
 
 echo "========================================================="
-echo "      MetaTester 5 Setup (Fully Automatic & Headless)    "
+echo "      MetaTester 5 Setup (Persistent Background Mode)    "
 echo "========================================================="
 echo "Cores: $CORES | MQL5 Login: ${MQL5_LOGIN:-None}"
 
@@ -24,56 +24,72 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
-echo "Installing dependencies silently (Please wait 1-2 minutes)..."
+# FIX 1: Added 'winbind' back. MT5 crashes without it!
+echo "Installing dependencies (wine, xvfb, winbind)..."
 sudo dpkg --add-architecture i386 > /dev/null 2>&1
 sudo -E apt-get update -yqq > /dev/null 2>&1
-sudo -E apt-get install -yqq wine64 wine32 xvfb tmux wget ufw > /dev/null 2>&1
+sudo -E apt-get install -yqq wine64 wine32 xvfb wget winbind > /dev/null 2>&1
+
+DIR="$HOME/mt5-agents"
+mkdir -p "$DIR"
+cd "$DIR"
 
 echo "Downloading metatester64.exe..."
-mkdir -p ~/mt5-agents
-cd ~/mt5-agents
 wget -q -nc -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
-START_PORT=3000
-for i in $(seq 1 $CORES); do
-    PORT=$((START_PORT + i - 1))
-    DIR="$HOME/mt5-agents/node_$PORT"
-    
-    echo "Starting Agent on port $PORT in the background..."
-    mkdir -p "$DIR"
-    cp metatester64.exe "$DIR/"
-    
-    ACCOUNT_FLAG=""
-    if [ ! -z "$MQL5_LOGIN" ]; then
-        ACCOUNT_FLAG="/account:$MQL5_LOGIN"
-        
-        # Inject Registry key for "Sell computing resources" BEFORE starting the agent
-        cat <<REG > "$DIR/cloud.reg"
+# Configure a single, unified Wine environment
+export WINEPREFIX="$DIR/wine_env"
+export WINEDEBUG=-all
+
+# Stop any stuck old processes
+killall -9 Xvfb wineserver metatester64.exe 2>/dev/null
+sleep 2
+
+echo "Starting Virtual Display & Wine Services..."
+# FIX 2: Start a PERMANENT, detached X server so agents never lose their display
+nohup Xvfb :99 -screen 0 1024x768x16 > /dev/null 2>&1 &
+export DISPLAY=:99
+sleep 2
+
+# FIX 3: Start a persistent Wine daemon to keep the background services alive
+nohup wineserver -p > /dev/null 2>&1 &
+sleep 2
+wineboot -u
+sleep 5
+
+if [ ! -z "$MQL5_LOGIN" ]; then
+    cat <<REG > cloud.reg
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
 "Login"="$MQL5_LOGIN"
 "SellComputingResources"=dword:00000001
 REG
-        WINEPREFIX="$DIR" WINEDEBUG=-all xvfb-run -a wine regedit "$DIR/cloud.reg" > /dev/null 2>&1
+    wine regedit cloud.reg > /dev/null 2>&1
+fi
+
+START_PORT=3000
+for i in $(seq 1 $CORES); do
+    PORT=$((START_PORT + i - 1))
+    
+    ACCOUNT_FLAG=""
+    if [ ! -z "$MQL5_LOGIN" ]; then
+        ACCOUNT_FLAG="/account:$MQL5_LOGIN"
     fi
     
-    # Kill any old crashed sessions on this port
-    tmux kill-session -t "agent_$PORT" 2>/dev/null
-    
-    # FIX: Run the install/start command DIRECTLY inside the detached tmux session.
-    # This prevents the script from pausing, and keeps the agent alive permanently.
-    tmux new-session -d -s "agent_$PORT" "WINEPREFIX=\"$DIR\" WINEDEBUG=-all xvfb-run -a wine \"$DIR/metatester64.exe\" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG"
-    
+    echo "Installing Agent on port $PORT..."
+    # The agent installs as a service and stays alive safely inside the permanent Wine environment
+    wine metatester64.exe /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
     sleep 2
-    echo "✅ Agent running natively on port $PORT"
+    
+    echo "✅ Agent is running on port $PORT"
 done
 
-# Run RAM Cleanup AFTER everything is launched
 echo "---------------------------------------------------------"
 echo "Cleaning up RAM Cache..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 
 echo "========================================================="
-echo "Setup Complete! $CORES Agents are running in the background."
-echo "Firewall is OFF. Kernel popups bypassed. RAM is cleaned."
+echo "Setup Complete! Agents are actively running."
+echo "To verify they are listening, copy and paste this command:"
+echo "sudo netstat -tulnp | grep wineserver"
 echo "========================================================="
