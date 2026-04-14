@@ -18,7 +18,7 @@ for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/nu
 echo "==> [2/7] Installing WineHQ & Xvfb (Virtual Display)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
-sudo apt-get install -y wine32 wine64 xvfb wget cabextract cron >/dev/null 2>&1
+sudo apt-get install -y wine32 wine64 xvfb wget cabextract >/dev/null 2>&1
 
 echo "==> [3/7] Initializing Master 64-bit Wine Prefix..."
 MASTER_WP="/opt/mt5master"
@@ -80,10 +80,11 @@ EOF
     sudo systemctl restart mt5-agent-$P.service
 done
 
-echo "==> [6/7] Setting up Auto-RAM Optimizer (Clears Cache every 3 mins)..."
-echo "*/3 * * * * root sync && echo 3 > /proc/sys/vm/drop_caches" | sudo tee /etc/cron.d/clear-mt5-cache > /dev/null
-sudo chmod 644 /etc/cron.d/clear-mt5-cache
-sudo systemctl restart cron || true
+echo "==> [6/7] One-time RAM cleanup (Removing old cron loops)..."
+# Delete the old 3-minute loop if it exists so it stops using CPU
+sudo rm -f /etc/cron.d/clear-mt5-cache 2>/dev/null || true
+# Perform a single flush of the RAM cache generated during installation
+sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
 echo "==> [7/7] Finalizing..."
 sleep 6
