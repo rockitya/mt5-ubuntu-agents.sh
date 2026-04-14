@@ -27,21 +27,36 @@ sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [4/7] Downloading & Extracting Master MetaTester silently..."
-# Downloading the exact mt5tester setup file from your GitHub
-wget -O /tmp/mt5testersetup.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5tester.setup%20(1).exe"
-xvfb-run -a wine /tmp/mt5testersetup.exe /auto >/dev/null 2>&1 &
+# Download the exact mt5tester setup file from your GitHub
+wget -qO /tmp/mt5testersetup.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5tester.setup%20(1).exe"
 
-echo "    Waiting 60 seconds for background extraction to finish..."
-sleep 60
-
-# Dynamically find the extracted executable in case the standalone tester uses a different folder
-MASTER_EX=$(find "$MASTER_WP/drive_c" -name "metatester64.exe" | head -n 1)
-
-if [ -z "$MASTER_EX" ]; then
-    echo "ERROR: metatester64.exe failed to extract."
+# Safety Check: Did it actually download the .exe? (Check if file is less than 1MB)
+FILESIZE=$(stat -c%s "/tmp/mt5testersetup.exe" 2>/dev/null || echo 0)
+if [ "$FILESIZE" -lt 1000000 ]; then
+    echo "ERROR: Downloaded file is too small ($FILESIZE bytes)."
+    echo "Make sure your GitHub repository is set to PUBLIC. If it is private, the download fails."
     exit 1
 fi
-echo "    Found executable at: $MASTER_EX"
+
+echo "    Download successful. Launching installer..."
+xvfb-run -a wine /tmp/mt5testersetup.exe /auto >/dev/null 2>&1 &
+
+echo "    Waiting for extraction to finish (Scanning up to 120 seconds)..."
+MASTER_EX=""
+for i in {1..24}; do
+    # Dynamically search the virtual C: drive for the executable
+    MASTER_EX=$(find "$MASTER_WP/drive_c" -name "metatester64.exe" 2>/dev/null | head -n 1)
+    if [ -n "$MASTER_EX" ]; then
+        echo "    -> Extraction complete! Found executable at: $MASTER_EX"
+        break
+    fi
+    sleep 5
+done
+
+if [ -z "$MASTER_EX" ]; then
+    echo "ERROR: metatester64.exe failed to extract after 2 minutes. Installer may be stuck."
+    exit 1
+fi
 
 # Get relative path so we can perfectly clone it to isolated agent folders
 RELATIVE_EX="${MASTER_EX#$MASTER_WP}"
