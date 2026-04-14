@@ -16,43 +16,30 @@ echo "      MetaTester 5 Setup (Fully Automatic & Headless)    "
 echo "========================================================="
 echo "Cores: $CORES | MQL5 Login: ${MQL5_LOGIN:-None}"
 
-# 1. Disable the Firewall completely
 echo "---------------------------------------------------------"
 echo "Disabling UFW Firewall..."
-sudo ufw disable
+sudo ufw disable > /dev/null 2>&1
 
-# 2. Block all interactive popups (Kernel Upgrades/Restarts)
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
-# 3. One-Time RAM Cleanup
-echo "---------------------------------------------------------"
-echo "Cleaning up RAM Cache..."
-sudo sync; sudo sysctl -w vm.drop_caches=3
+echo "Installing dependencies silently (Please wait 1-2 minutes)..."
+sudo dpkg --add-architecture i386 > /dev/null 2>&1
+sudo -E apt-get update -yqq > /dev/null 2>&1
+sudo -E apt-get install -yqq wine64 wine32 xvfb tmux wget ufw > /dev/null 2>&1
 
-# 4. Install Dependencies (Silently)
-echo "---------------------------------------------------------"
-echo "Installing Wine and dependencies (This may take a minute)..."
-sudo dpkg --add-architecture i386
-sudo -E apt-get update -yq
-sudo -E apt-get install -yq wine64 wine32 xvfb tmux wget ufw
-
-# 5. Download metatester64.exe
-echo "---------------------------------------------------------"
+echo "Downloading metatester64.exe..."
 mkdir -p ~/mt5-agents
 cd ~/mt5-agents
-echo "Downloading metatester64.exe..."
 wget -q -nc -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
-# 6. Build Agent Nodes
-echo "---------------------------------------------------------"
 START_PORT=3000
 for i in $(seq 1 $CORES); do
     PORT=$((START_PORT + i - 1))
     DIR="$HOME/mt5-agents/node_$PORT"
     
-    echo "Configuring Agent on port $PORT..."
+    echo "Configuring Agent on port $PORT (Takes ~10 seconds)..."
     mkdir -p "$DIR"
     cp metatester64.exe "$DIR/"
     
@@ -61,7 +48,9 @@ for i in $(seq 1 $CORES); do
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
     fi
     
-    WINEPREFIX="$DIR" WINEDEBUG=-all xvfb-run -a wine "$DIR/metatester64.exe" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
+    # FIX: Use 'timeout 10' to forcefully cut off the hanging /install command
+    # It creates the config instantly, then hangs trying to start the service.
+    WINEPREFIX="$DIR" WINEDEBUG=-all timeout 10 xvfb-run -a wine "$DIR/metatester64.exe" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
     
     # Inject Registry key for "Sell computing resources"
     if [ ! -z "$MQL5_LOGIN" ]; then
@@ -82,7 +71,12 @@ REG
     echo "✅ Agent running natively on port $PORT"
 done
 
+# Run RAM Cleanup AFTER installation
+echo "---------------------------------------------------------"
+echo "Cleaning up RAM Cache..."
+sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
+
 echo "========================================================="
 echo "Setup Complete! $CORES Agents are running in the background."
-echo "Firewall is OFF. Kernel popups were bypassed."
+echo "Firewall is OFF. Kernel popups bypassed. RAM is cleaned."
 echo "========================================================="
