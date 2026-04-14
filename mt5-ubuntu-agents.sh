@@ -4,7 +4,7 @@ set -e
 # Accept the number of cores as an argument, or default to all available cores
 REQUESTED_CORES=${1:-$(nproc)}
 
-echo "==> [1/6] Preparing Ubuntu & Removing Firewall..."
+echo "==> [1/7] Preparing Ubuntu & Removing Firewall..."
 export DEBIAN_FRONTEND=noninteractive
 sudo dpkg --configure -a || true
 sudo apt-get remove --purge -y needrestart ufw firewalld >/dev/null 2>&1 || true
@@ -15,18 +15,18 @@ sudo systemctl stop MetaTester-1.service 2>/dev/null || true
 sudo rm -f /etc/systemd/system/MetaTester-1.service 2>/dev/null || true
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; done
 
-echo "==> [2/6] Installing WineHQ & Xvfb (Virtual Display)..."
+echo "==> [2/7] Installing WineHQ & Xvfb (Virtual Display)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
-sudo apt-get install -y wine32 wine64 xvfb wget cabextract >/dev/null 2>&1
+sudo apt-get install -y wine32 wine64 xvfb wget cabextract cron >/dev/null 2>&1
 
-echo "==> [3/6] Initializing Master 64-bit Wine Prefix..."
+echo "==> [3/7] Initializing Master 64-bit Wine Prefix..."
 MASTER_WP="/opt/mt5master"
 export WINEPREFIX=$MASTER_WP WINEARCH=win64 DISPLAY=:99
 sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
-echo "==> [4/6] Downloading & Extracting Master MetaTrader 5 silently..."
+echo "==> [4/7] Downloading & Extracting Master MetaTrader 5 silently..."
 wget -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
 
@@ -39,7 +39,7 @@ if [ ! -f "$MASTER_EX" ]; then
     exit 1
 fi
 
-echo "==> [5/6] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
+echo "==> [5/7] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
 PW="MetaTester"
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
@@ -55,7 +55,7 @@ for P in $(seq $SP $EP); do
     
     AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
-    # Register the agent silently
+    # Register the agent silently inside its isolated folder
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW >/dev/null 2>&1
     
     # Create persistent SystemD service
@@ -80,7 +80,12 @@ EOF
     sudo systemctl restart mt5-agent-$P.service
 done
 
-echo "==> [6/6] Finalizing..."
+echo "==> [6/7] Setting up Auto-RAM Optimizer (Clears Cache every 3 mins)..."
+echo "*/3 * * * * root sync && echo 3 > /proc/sys/vm/drop_caches" | sudo tee /etc/cron.d/clear-mt5-cache > /dev/null
+sudo chmod 644 /etc/cron.d/clear-mt5-cache
+sudo systemctl restart cron || true
+
+echo "==> [7/7] Finalizing..."
 sleep 6
 
 echo ""
