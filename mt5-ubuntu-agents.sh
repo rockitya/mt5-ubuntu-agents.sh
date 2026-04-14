@@ -26,40 +26,19 @@ export WINEPREFIX=$MASTER_WP WINEARCH=win64 DISPLAY=:99
 sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
-echo "==> [4/7] Downloading & Extracting Master MetaTester silently..."
-# Download the exact mt5tester setup file from your GitHub
-wget -qO /tmp/mt5testersetup.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5tester.setup%20(1).exe"
+echo "==> [4/7] Downloading Portable MetaTester64 directly..."
+# We completely skip the broken installer and download the raw, portable executable directly
+mkdir -p "$MASTER_WP/drive_c/Program Files/MetaTrader 5/"
+MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
-# Safety Check: Did it actually download the .exe? (Check if file is less than 1MB)
-FILESIZE=$(stat -c%s "/tmp/mt5testersetup.exe" 2>/dev/null || echo 0)
-if [ "$FILESIZE" -lt 1000000 ]; then
-    echo "ERROR: Downloaded file is too small ($FILESIZE bytes)."
-    echo "Make sure your GitHub repository is set to PUBLIC. If it is private, the download fails."
+# Downloading a pre-extracted portable metatester64.exe from a reliable Docker repo
+wget -qO "$MASTER_EX" "https://github.com/tickelton/docker-metatrader/raw/master/metatester64.exe"
+
+if [ ! -f "$MASTER_EX" ]; then
+    echo "ERROR: Failed to download the portable metatester64.exe file."
     exit 1
 fi
-
-echo "    Download successful. Launching installer..."
-xvfb-run -a wine /tmp/mt5testersetup.exe /auto >/dev/null 2>&1 &
-
-echo "    Waiting for extraction to finish (Scanning up to 120 seconds)..."
-MASTER_EX=""
-for i in {1..24}; do
-    # Dynamically search the virtual C: drive for the executable
-    MASTER_EX=$(find "$MASTER_WP/drive_c" -name "metatester64.exe" 2>/dev/null | head -n 1)
-    if [ -n "$MASTER_EX" ]; then
-        echo "    -> Extraction complete! Found executable at: $MASTER_EX"
-        break
-    fi
-    sleep 5
-done
-
-if [ -z "$MASTER_EX" ]; then
-    echo "ERROR: metatester64.exe failed to extract after 2 minutes. Installer may be stuck."
-    exit 1
-fi
-
-# Get relative path so we can perfectly clone it to isolated agent folders
-RELATIVE_EX="${MASTER_EX#$MASTER_WP}"
+echo "    -> Download complete! No installation required."
 
 echo "==> [5/7] Isolating MetaTester Agents for $REQUESTED_CORES cores..."
 PW="MetaTester"
@@ -75,8 +54,7 @@ for P in $(seq $SP $EP); do
     sudo rm -rf "$AGENT_WP"
     sudo cp -r "$MASTER_WP" "$AGENT_WP"
     
-    # Map the dynamically found executable path to the newly cloned prefix
-    AGENT_EX="$AGENT_WP$RELATIVE_EX"
+    AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
     # Register the agent silently inside its isolated folder
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW >/dev/null 2>&1
