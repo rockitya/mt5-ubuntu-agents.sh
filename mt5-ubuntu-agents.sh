@@ -12,7 +12,7 @@ if [ -z "$CORES" ] || [ -z "$PASSWORD" ]; then
 fi
 
 echo "========================================================="
-echo "      MetaTester 5 Setup (Final Fixed Architecture)      "
+echo "      MetaTester 5 Setup (Final Application Mode)        "
 echo "========================================================="
 echo "Cores: $CORES | MQL5 Login: ${MQL5_LOGIN:-None}"
 
@@ -24,7 +24,7 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export NEEDRESTART_SUSPEND=1
 
-echo "Installing Wine and Networking packages (winbind, net-tools, tmux)..."
+echo "Installing required packages (wine, xvfb, winbind, tmux)..."
 sudo dpkg --add-architecture i386 > /dev/null 2>&1
 sudo -E apt-get update -yqq > /dev/null 2>&1
 sudo -E apt-get install -yqq wine wine64 wine32 xvfb wget winbind net-tools tmux > /dev/null 2>&1
@@ -34,36 +34,34 @@ mkdir -p ~/mt5-agents
 cd ~/mt5-agents
 wget -q -nc -O metatester64.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/metatester64.exe"
 
+# Stop all old processes and clear out old tmux sessions
+killall -9 wineserver metatester64.exe wine 2>/dev/null
+for i in $(tmux ls | awk -F: '{print $1}'); do tmux kill-session -t "$i"; done
+sleep 2
+
 START_PORT=3000
 
 for i in $(seq 1 $CORES); do
     PORT=$((START_PORT + i - 1))
     DIR="$HOME/mt5-agents/node_$PORT"
     export WINEPREFIX="$DIR"
-    export WINEDEBUG=-all
     
-    echo "Configuring Agent on port $PORT..."
+    echo "Configuring and starting Agent Application on port $PORT..."
     
-    # 1. Wipe old corrupted attempts and setup a fresh environment
-    wineserver -k > /dev/null 2>&1
+    # Rebuild fresh directories for each agent
     rm -rf "$DIR"
     mkdir -p "$DIR"
     cp metatester64.exe "$DIR/"
     
-    # Initialize the fresh Wine prefix
+    # Pre-boot the Wine environment so it generates standard folders
     xvfb-run -a wineboot -u > /dev/null 2>&1
     sleep 2
     
     ACCOUNT_FLAG=""
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
-    fi
-    
-    # 2. INSTALL the agent (Timeout is required because Wine holds the terminal open)
-    timeout 10 xvfb-run -a wine "$DIR/metatester64.exe" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG > /dev/null 2>&1
-    
-    # 3. Inject Cloud Network Registry
-    if [ ! -z "$MQL5_LOGIN" ]; then
+        
+        # Inject Cloud Network Registry BEFORE starting the application to force the "Sell" feature
         cat <<REG > "$DIR/cloud.reg"
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
@@ -73,16 +71,11 @@ REG
         xvfb-run -a wine regedit "$DIR/cloud.reg" > /dev/null 2>&1
     fi
     
-    # Safely kill the installation process
-    wineserver -k > /dev/null 2>&1
+    # Run the application directly inside tmux
+    tmux new-session -d -s "agent_$PORT" "WINEPREFIX=\"$DIR\" WINEDEBUG=-all xvfb-run -a wine \"$DIR/metatester64.exe\" /install /address:0.0.0.0:$PORT /password:$PASSWORD $ACCOUNT_FLAG"
+    
+    echo "✅ Application running safely in background (tmux session: agent_$PORT)"
     sleep 2
-    
-    # 4. START the agent
-    # 'wineboot' turns the Windows Services on. 'wineserver -w' keeps the container permanently alive.
-    tmux kill-session -t "agent_$PORT" 2>/dev/null
-    tmux new-session -d -s "agent_$PORT" "WINEPREFIX=\"$DIR\" xvfb-run -a bash -c 'wineboot && wineserver -w'"
-    
-    echo "✅ Agent is fully installed and STARTED on port $PORT"
 done
 
 echo "---------------------------------------------------------"
@@ -91,6 +84,8 @@ sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 
 echo "========================================================="
 echo "Setup Complete!"
-echo "Run this command to prove they are actively listening:"
-echo "sudo netstat -tulnp | grep wineserver"
+echo "Check your ports using: sudo netstat -tulnp | grep wineserver"
+if [ ! -z "$MQL5_LOGIN" ]; then
+    echo "Note: It can take 15-20 minutes for new agents to appear on your MQL5 Cloud profile."
+fi
 echo "========================================================="
