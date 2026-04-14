@@ -18,7 +18,7 @@ for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/nu
 echo "==> [2/7] Installing WineHQ & Xvfb (Virtual Display)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
-sudo apt-get install -y wine32 wine64 xvfb wget cabextract >/dev/null 2>&1
+sudo apt-get install -y wine32 wine64 xvfb wget cabextract ca-certificates >/dev/null 2>&1
 
 echo "==> [3/7] Initializing Master 64-bit Wine Prefix..."
 MASTER_WP="/opt/mt5master"
@@ -27,7 +27,8 @@ sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [4/7] Downloading & Extracting Master MetaTrader 5 silently..."
-wget -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+# Bypassing the SSL connection error with --no-check-certificate
+wget --no-check-certificate -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
 
 echo "    Waiting 60 seconds for background extraction to finish..."
