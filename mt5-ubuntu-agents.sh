@@ -1,23 +1,45 @@
 #!/bin/bash
 set -e
+# MT5 Ubuntu Cloud Agents — Full Setup Script
+# Usage: bash mt5-ubuntu-agents.sh [CORES] [PASSWORD] [MQL5_LOGIN]
+# Example: bash mt5-ubuntu-agents.sh 7 Prem@1996 rcktya
 
 TOTAL_CORES=$(nproc)
-REQUESTED_CORES=${1:-$((TOTAL_CORES > 1 ? TOTAL_CORES - 1 : 1))}
-[ "$REQUESTED_CORES" -ge "$TOTAL_CORES" ] && [ "$TOTAL_CORES" -gt 1 ] && REQUESTED_CORES=$((TOTAL_CORES - 1)) && echo "WARNING: Reserving 1 core for OS stability."
+if [ -z "$1" ]; then
+    REQUESTED_CORES=$((TOTAL_CORES > 1 ? TOTAL_CORES - 1 : 1))
+else
+    REQUESTED_CORES=$1
+    if [ "$REQUESTED_CORES" -ge "$TOTAL_CORES" ] && [ "$TOTAL_CORES" -gt 1 ]; then
+        echo "WARNING: Reserving 1 core for OS stability."
+        REQUESTED_CORES=$((TOTAL_CORES - 1))
+    fi
+fi
+
 PW=${2:-"MetaTester"}
 MQL5_LOGIN=$3
 export DEBIAN_FRONTEND=noninteractive
 
-echo "==> [1/6] Cleaning old installs..."
+echo "============================================="
+echo " MT5 Cloud Agent Setup"
+echo " Cores: $REQUESTED_CORES | Login: ${MQL5_LOGIN:-none}"
+echo "============================================="
+
+# --- [1/8] WIPE ---
+echo "==> [1/8] NUCLEAR WIPE..."
+screen -ls 2>/dev/null | grep mt5 | awk '{print $1}' | xargs -I{} screen -X -S {} quit 2>/dev/null || true
 pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f wineserver 2>/dev/null || true
 pkill -9 -f Xvfb 2>/dev/null || true
-screen -ls 2>/dev/null | grep mt5 | awk '{print $1}' | xargs -I{} screen -X -S {} quit 2>/dev/null || true
-rm -rf /opt/mt5* 2>/dev/null || true
+sleep 3
+rm -rf /opt/mt5* /tmp/mt5setup.exe 2>/dev/null || true
 apt-get remove --purge -y wine* winehq* 2>/dev/null || true
 apt-get autoremove -y >/dev/null 2>&1 || true
+crontab -l 2>/dev/null | grep -v mt5 | grep -v clear-ram | crontab - 2>/dev/null || true
+rm -f /usr/local/bin/clear-ram-cache.sh 2>/dev/null || true
+echo "    -> Done."
 
-echo "==> [2/6] Installing WineHQ Devel + dependencies..."
+# --- [2/8] WINE ---
+echo "==> [2/8] Installing WineHQ Devel..."
 dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings
 wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
@@ -28,135 +50,169 @@ apt-get update -y >/dev/null
 apt-get install -y --install-recommends winehq-devel xvfb screen wget net-tools cabextract >/dev/null 2>&1
 echo "    -> $(wine --version)"
 
-echo "==> [3/6] Setting up Swap & Network..."
-if ! swapon --show | grep -q "/swapfile"; then
-    fallocate -l 64G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
-    chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile || true
-fi
-cat <<EOF > /etc/sysctl.d/99-mt5.conf
+# --- [3/8] SWAP ---
+echo "==> [3/8] Setting up 64GB Swap (persistent)..."
+swapoff -a 2>/dev/null || true
+rm -f /swapfile 2>/dev/null || true
+fallocate -l 64G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
+chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+cat > /etc/sysctl.d/99-mt5.conf << 'EOF'
+vm.swappiness=10
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
 net.ipv4.tcp_keepalive_probes=6
 net.ipv4.tcp_fin_timeout=30
-vm.swappiness=60
+net.core.somaxconn=1024
+fs.file-max=1000000
 EOF
 sysctl -p /etc/sysctl.d/99-mt5.conf >/dev/null 2>&1 || true
+echo "    -> $(free -h | grep Swap) — persisted in /etc/fstab"
 
-echo "==> [4/6] Installing FULL MT5 Suite via official installer..."
+# --- [4/8] RAM CACHE ---
+echo "==> [4/8] Scheduling RAM cache auto-clear every 30 minutes..."
+cat > /usr/local/bin/clear-ram-cache.sh << 'EOF'
+#!/bin/bash
+sync
+echo 3 > /proc/sys/vm/drop_caches
+EOF
+chmod +x /usr/local/bin/clear-ram-cache.sh
+/usr/local/bin/clear-ram-cache.sh
+(crontab -l 2>/dev/null | grep -v clear-ram-cache; echo "*/30 * * * * /usr/local/bin/clear-ram-cache.sh") | crontab -
+echo "    -> RAM cache cleared now. Auto-clear every 30 min via cron."
+
+# --- [5/8] MT5 FULL INSTALL ---
+echo "==> [5/8] Downloading & Installing FULL MT5 Suite (~2-3 minutes)..."
 export WINEPREFIX=/opt/mt5master
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
 mkdir -p $WINEPREFIX
-
 xvfb-run -a wineboot -u >/dev/null 2>&1
-echo "    -> Wine prefix ready."
+echo "    -> Wine prefix initialized."
 
-echo "    -> Downloading mt5setup.exe (using browser User-Agent to bypass CDN)..."
 wget -q --show-progress \
     --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" \
     -O /tmp/mt5setup.exe \
     "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+echo "    -> mt5setup.exe downloaded. Running silent install..."
 
-echo "    -> Running installer (this installs ALL required DLLs and files, ~90s)..."
 xvfb-run -a wine /tmp/mt5setup.exe /auto &
 INSTALL_PID=$!
 
-# Wait for the FULL installation directory with terminal64.dll to appear
-for i in {1..36}; do
+for i in {1..60}; do
     if find $WINEPREFIX -name "metatester64.exe" 2>/dev/null | grep -q .; then
-        echo "    -> Full MT5 installation detected after $((i*5))s!"
+        echo "    -> Full MT5 installation confirmed after $((i*5))s!"
         break
     fi
-    echo "    ...Installing ($((i*5))s)..."
+    echo "    ...Installing ($((i*5))s / 300s)..."
     sleep 5
 done
 
-# Find where it was installed
-MT5_INSTALL_DIR=$(find $WINEPREFIX -name "metatester64.exe" -exec dirname {} \; 2>/dev/null | head -1)
-if [ -z "$MT5_INSTALL_DIR" ]; then
-    echo "ERROR: MT5 installation failed. Exiting."
+MT5_DIR=$(find $WINEPREFIX -name "metatester64.exe" -exec dirname {} \; 2>/dev/null | head -1)
+if [ -z "$MT5_DIR" ]; then
+    echo "ERROR: MT5 installation failed. metatester64.exe not found. Exiting."
     exit 1
 fi
-echo "    -> Installed at: $MT5_INSTALL_DIR"
-
-# Kill installer process
+WIN_EX="$(echo "$MT5_DIR" | sed "s|$WINEPREFIX/drive_c|C:|" | sed 's|/|\\|g')\\metatester64.exe"
+echo "    -> Installed at: $WIN_EX"
 kill $INSTALL_PID 2>/dev/null || true
-pkill -f "mt5setup" 2>/dev/null || true
+pkill -f mt5setup 2>/dev/null || true
 sleep 3
 
-echo "==> [5/6] Cloning full installation to $REQUESTED_CORES agents..."
+# --- [6/8] CLOUD.PING CLEAR ---
+echo "==> [6/8] Clearing Cloud.Ping cache for clean cloud connection..."
+WINEPREFIX="$WINEPREFIX" WINEARCH=win64 wine reg add \
+    "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" \
+    /ve /t REG_SZ /d "" /f >/dev/null 2>&1 || true
+echo "    -> Cloud.Ping cache cleared."
+
+# --- [7/8] DEPLOY AGENTS ---
+echo "==> [7/8] Cloning master and launching $REQUESTED_CORES agents..."
+mkdir -p /opt/mt5
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
-for P in $(seq $SP $EP); do
-    echo "    -> Creating agent on port $P..."
-    AGENT_WP="/opt/mt5agent-$P"
+cat > /opt/mt5/start-all.sh << 'STARTEOF'
+#!/bin/bash
+screen -ls 2>/dev/null | grep mt5 | awk '{print $1}' | xargs -I{} screen -X -S {} quit 2>/dev/null || true
+pkill -9 -f metatester64 2>/dev/null || true
+pkill -9 -f wineserver 2>/dev/null || true
+sleep 5
+STARTEOF
 
-    # Copy the COMPLETE Wine prefix (with all DLLs and MT5 files)
+for P in $(seq $SP $EP); do
+    echo "    -> Deploying agent on port $P..."
+    AGENT_WP="/opt/mt5agent-$P"
     cp -r "$WINEPREFIX" "$AGENT_WP"
 
-    # Find the agent exe in the cloned prefix
     AGENT_EX=$(find $AGENT_WP -name "metatester64.exe" 2>/dev/null | head -1)
-    WIN_EX=$(echo "$AGENT_EX" | sed "s|$AGENT_WP/drive_c|C:|" | sed 's|/|\\|g')
+    AGENT_WIN_EX="$(echo "$AGENT_EX" | sed "s|$AGENT_WP/drive_c|C:|" | sed 's|/|\\|g')"
+
+    # Clear Cloud.Ping in each agent prefix
+    WINEPREFIX="$AGENT_WP" WINEARCH=win64 wine reg add \
+        "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" \
+        /ve /t REG_SZ /d "" /f >/dev/null 2>&1 || true
 
     ACCOUNT_FLAG=""
-    [ ! -z "$MQL5_LOGIN" ] && ACCOUNT_FLAG="/account:$MQL5_LOGIN"
+    if [ ! -z "$MQL5_LOGIN" ]; then
+        ACCOUNT_FLAG="/account:$MQL5_LOGIN"
+        WINEPREFIX="$AGENT_WP" WINEARCH=win64 wine reg add \
+            "HKEY_CURRENT_USER\\Software\\MetaQuotes\\MetaTester" \
+            /v "Login" /t REG_SZ /d "$MQL5_LOGIN" /f >/dev/null 2>&1 || true
+        WINEPREFIX="$AGENT_WP" WINEARCH=win64 wine reg add \
+            "HKEY_CURRENT_USER\\Software\\MetaQuotes\\MetaTester" \
+            /v "SellComputingResources" /t REG_DWORD /d "1" /f >/dev/null 2>&1 || true
+        CONFIG_DIR="$AGENT_WP/drive_c/users/Public/AppData/Roaming/MetaQuotes/Tester"
+        mkdir -p "$CONFIG_DIR"
+        printf '[Tester]\nPort=%s\nPassword=%s\n[Cloud]\nLogin=%s\nSellComputingResources=1\n' \
+            "$P" "$PW" "$MQL5_LOGIN" > "$CONFIG_DIR/metatester.ini"
+    fi
 
     screen -dmS mt5-$P bash -c "
         export WINEPREFIX=$AGENT_WP
         export WINEARCH=win64
         export WINEDLLOVERRIDES='mscoree,mshtml='
         xvfb-run --auto-servernum --server-args='-screen 0 1024x768x24' \
-            wine '$WIN_EX' /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
+            wine '$AGENT_WIN_EX' /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
     "
-    echo "    -> Agent $P launched in screen session mt5-$P"
+    echo "      -> Agent $P launched in screen session: mt5-$P"
+
+    echo "screen -dmS mt5-$P bash -c \"export WINEPREFIX=$AGENT_WP; export WINEARCH=win64; export WINEDLLOVERRIDES='mscoree,mshtml='; xvfb-run --auto-servernum --server-args='-screen 0 1024x768x24' wine '$AGENT_WIN_EX' /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG\"" >> /opt/mt5/start-all.sh
 done
 
-# Write startup script for reboots
-STARTUP=/opt/mt5/start-all.sh
-mkdir -p /opt/mt5
-cat > $STARTUP << 'STARTEOF'
-#!/bin/bash
-pkill -9 -f metatester64 2>/dev/null || true
-pkill -9 -f wineserver 2>/dev/null || true
-sleep 3
-STARTEOF
+chmod +x /opt/mt5/start-all.sh
+(crontab -l 2>/dev/null | grep -v mt5; \
+    echo "@reboot sleep 20 && /usr/local/bin/clear-ram-cache.sh && /opt/mt5/start-all.sh") | crontab -
+echo "    -> @reboot cron added (agents + RAM clear on every boot)."
 
-for P in $(seq $SP $EP); do
-    AGENT_WP="/opt/mt5agent-$P"
-    AGENT_EX=$(find $AGENT_WP -name "metatester64.exe" 2>/dev/null | head -1)
-    WIN_EX=$(echo "$AGENT_EX" | sed "s|$AGENT_WP/drive_c|C:|" | sed 's|/|\\|g')
-    ACCOUNT_FLAG=""
-    [ ! -z "$MQL5_LOGIN" ] && ACCOUNT_FLAG="/account:$MQL5_LOGIN"
-    cat >> $STARTUP << STARTEOF
-screen -dmS mt5-$P bash -c "export WINEPREFIX=$AGENT_WP; export WINEARCH=win64; export WINEDLLOVERRIDES='mscoree,mshtml='; xvfb-run --auto-servernum --server-args='-screen 0 1024x768x24' wine '$WIN_EX' /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG"
-STARTEOF
-done
-
-chmod +x $STARTUP
-(crontab -l 2>/dev/null | grep -v mt5; echo "@reboot sleep 20 && $STARTUP") | crontab -
-
-echo "==> [6/6] Waiting for agents to come online (up to 5 minutes)..."
+# --- [8/8] VERIFY ---
+echo "==> [8/8] Waiting for agents to come online (up to 5 minutes)..."
 for i in {1..60}; do
     COUNT=$(ss -tuln 2>/dev/null | grep -cE ":30[0-9]{2}" || true)
     if [ "$COUNT" -ge 1 ]; then
         echo ""
-        echo "========================================="
-        echo "✓ SUCCESS! $COUNT / $REQUESTED_CORES agents online!"
+        echo "============================================="
+        echo "  SUCCESS: $COUNT / $REQUESTED_CORES agents online!"
         ss -tuln | grep -E ":30[0-9]{2}" | awk '{print $5}'
-        echo "========================================="
-        [ ! -z "$MQL5_LOGIN" ] && echo "Cloud Selling: ENABLED for '$MQL5_LOGIN'"
+        echo "============================================="
+        [ ! -z "$MQL5_LOGIN" ] && echo "  Cloud: ENABLED for account '$MQL5_LOGIN'"
         echo ""
-        echo "Useful commands:"
-        echo "  screen -ls              (see all agents)"
-        echo "  screen -r mt5-3000      (watch agent live)"
-        echo "  Ctrl+A then D           (detach from screen)"
-        echo "  /opt/mt5/start-all.sh   (restart all after reboot)"
-        echo "========================================="
+        echo "  Useful commands:"
+        echo "    screen -ls                          (see all sessions)"
+        echo "    screen -r mt5-3000                  (watch agent live)"
+        echo "    Ctrl+A then D                       (detach from screen)"
+        echo "    /opt/mt5/start-all.sh               (restart all agents)"
+        echo "    /usr/local/bin/clear-ram-cache.sh   (clear RAM manually)"
+        echo ""
+        echo "  Check cloud ping (wait ~3 minutes after start):"
+        echo "    screen -r mt5-3000"
+        echo "    (look for: Network server agentX.mql5.net ping XX ms)"
+        echo "    Verify online: https://cloud.mql5.com"
+        echo "============================================="
         exit 0
     fi
-    echo "    ...Waiting ($((i*5))s)..."
+    echo "    ...Waiting ($((i*5))s / 300s)..."
     sleep 5
 done
 
-echo "❌ TIMEOUT. Attach to see what Wine is doing: screen -r mt5-3000"
+echo "TIMEOUT: Attach to see live output: screen -r mt5-3000"
