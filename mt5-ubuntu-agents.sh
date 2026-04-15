@@ -112,8 +112,8 @@ Windows Registry Editor Version 5.00
 REG
         WINEPREFIX="$AGENT_WP" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
 
-        # THE ULTIMATE FIX: 2. Force-inject the hidden INI files that the modern build requires
-        # MetaTester looks in the hidden AppData folder to confirm cloud settings
+        # 2. Force-inject the AppData INI file
+        # This is where MetaTester natively looks for Cloud settings on boot
         CONFIG_DIR="$AGENT_WP/drive_c/users/root/AppData/Roaming/MetaQuotes/Tester"
         mkdir -p "$CONFIG_DIR"
         
@@ -125,18 +125,9 @@ Password=$PW
 Login=$MQL5_LOGIN
 SellComputingResources=1
 INI
-
-        cat <<INI > "$AGENT_WP/drive_c/Program Files/MetaTrader 5/config/metatester.ini"
-[Tester]
-Port=$P
-Password=$PW
-[Cloud]
-Login=$MQL5_LOGIN
-SellComputingResources=1
-INI
     fi
 
-    # Install the agent
+    # Install the agent locally
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG >/dev/null 2>&1
     
     # Run the background service
