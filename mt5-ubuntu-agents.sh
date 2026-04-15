@@ -5,13 +5,12 @@ set -e
 # Usage: bash mt5-ubuntu-agents.sh [CORES] [PASSWORD] [MQL5_LOGIN]
 # Example: bash mt5-ubuntu-agents.sh 7 Prem@1996 rcktya
 #
-# On CDN block — one-time SCP from local PC:
-#   curl -o mt5setup.exe 'https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe'
+# CDN blocked? No problem — Tor is used automatically for download + install.
+# Already have mt5setup.exe? SCP it once and it's reused forever:
 #   scp mt5setup.exe root@SERVER:/opt/mt5setup.exe
-# Then re-run — download is skipped automatically.
 #
-# Password tip: echo 'Prem@1996' > /root/.mt5pw && chmod 600 /root/.mt5pw
-# (Keeps password out of ps/history/cron logs)
+# Password tip (keeps it out of ps/history):
+#   echo 'YourPassword' > /root/.mt5pw && chmod 600 /root/.mt5pw
 
 TOTAL_CORES=$(nproc)
 if [ -z "$1" ]; then
@@ -50,15 +49,15 @@ pkill -9 -f wineserver 2>/dev/null || true
 pkill -9 -f Xvfb 2>/dev/null || true
 sleep 3
 rm -rf /opt/mt5master /opt/mt5agent-* /opt/mt5 2>/dev/null || true
-# NOTE: /opt/mt5setup.exe is intentionally preserved — not wiped on rerun
+# NOTE: /opt/mt5setup.exe is intentionally preserved across reruns
 apt-get remove --purge -y wine* winehq* 2>/dev/null || true
 apt-get autoremove -y >/dev/null 2>&1 || true
 crontab -l 2>/dev/null | grep -v mt5 | grep -v clear-ram | crontab - 2>/dev/null || true
 rm -f /usr/local/bin/clear-ram-cache.sh 2>/dev/null || true
 echo "    -> Done."
 
-# --- [2/8] WINE DEVEL ---
-echo "==> [2/8] Installing WineHQ Devel..."
+# --- [2/8] WINE DEVEL + TOR + PROXYCHAINS ---
+echo "==> [2/8] Installing WineHQ Devel + Tor + Proxychains..."
 dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings
 wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
@@ -66,7 +65,35 @@ UBUNTU_VER=$(lsb_release -cs)
 wget -q -NP /etc/apt/sources.list.d/ \
     "https://dl.winehq.org/wine-builds/ubuntu/dists/$UBUNTU_VER/winehq-$UBUNTU_VER.sources"
 apt-get update -y >/dev/null
-apt-get install -y --install-recommends winehq-devel xvfb screen wget net-tools cabextract curl rsync >/dev/null 2>&1
+apt-get install -y --install-recommends \
+    winehq-devel xvfb screen wget net-tools cabextract curl rsync \
+    tor torsocks proxychains4 >/dev/null 2>&1
+
+# Configure proxychains: dynamic chain through Tor SOCKS5 on 127.0.0.1:9050
+sed -i 's/^strict_chain/#strict_chain/'     /etc/proxychains4.conf
+sed -i 's/^#dynamic_chain/dynamic_chain/'   /etc/proxychains4.conf
+sed -i 's/^#proxy_dns/proxy_dns/'           /etc/proxychains4.conf
+sed -i '/^socks/d'                           /etc/proxychains4.conf
+echo "socks5 127.0.0.1 9050"               >> /etc/proxychains4.conf
+
+# Start Tor and wait for a working circuit (up to 60s)
+systemctl start tor
+systemctl enable tor >/dev/null 2>&1
+echo "    -> Waiting for Tor circuit (up to 60s)..."
+TOR_READY=0
+for i in {1..30}; do
+    if proxychains4 -q curl -s --max-time 5 \
+        https://check.torproject.org/api/ip 2>/dev/null | grep -q '"IsTor":true'; then
+        echo "    -> Tor circuit ready after $((i*2))s."
+        TOR_READY=1
+        break
+    fi
+    sleep 2
+done
+if [ "$TOR_READY" -eq 0 ]; then
+    echo "    WARNING: Tor circuit not confirmed — will try anyway."
+fi
+
 echo "    -> $(wine --version)"
 
 # --- [3/8] SWAP ---
@@ -115,6 +142,8 @@ chmod +x /usr/local/bin/clear-ram-cache.sh
 echo "    -> RAM cache cleared now. Auto-clear every 30 min via cron."
 
 # --- [5/8] MT5 SETUP DOWNLOAD (ONCE ONLY, REUSE ON RERUNS) ---
+# IMPORTANT: mt5setup.exe is a WEB INSTALLER (~300KB). It downloads MT5
+# components from MetaQuotes CDN at install time too — so Tor covers both.
 echo "==> [5/8] Checking for mt5setup.exe..."
 
 SETUP_FILE="/opt/mt5setup.exe"
@@ -125,31 +154,33 @@ FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 if [ "$FILESIZE" -gt 1000000 ]; then
     echo "    -> Reusing cached mt5setup.exe ($(du -sh $SETUP_FILE | cut -f1)). Skipping download."
 else
-    echo "    -> No cached installer found. Downloading from MetaQuotes CDN..."
-    wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
-        curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
+    echo "    -> Downloading via Tor (bypasses MetaQuotes CDN IP block)..."
+    proxychains4 -q wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
+        proxychains4 -q curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
 
     FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 
     if [ "$FILESIZE" -lt 1000000 ]; then
         echo ""
-        echo "ERROR: CDN blocked or download failed (${FILESIZE} bytes)."
+        echo "ERROR: All download methods failed (${FILESIZE} bytes)."
         echo ""
-        echo "  One-time manual fix — run on your LOCAL PC:"
+        echo "  Option A — Manual SCP from your LOCAL PC:"
         echo "  curl -o mt5setup.exe '${MT5_CDN}'"
         echo "  scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):${SETUP_FILE}"
         echo ""
-        echo "  After SCP, re-run this script — download will be skipped automatically."
+        echo "  Option B — Retry Tor (may need a new circuit):"
+        echo "  systemctl restart tor && sleep 10"
+        echo "  bash $0 $*"
         rm -f "$SETUP_FILE"
         exit 1
     fi
-    echo "    -> Downloaded and cached: $(du -sh $SETUP_FILE | cut -f1)"
+    echo "    -> Downloaded via Tor: $(du -sh $SETUP_FILE | cut -f1)"
 fi
 
-# Symlink to /tmp for wine install
+# Symlink to /tmp for Wine install command
 ln -sf "$SETUP_FILE" /tmp/mt5setup.exe
 
-# --- [5b/8] WINE PREFIX INIT + MT5 INSTALL ---
+# --- [5b/8] WINE PREFIX INIT + MT5 INSTALL (VIA TOR) ---
 echo "    -> Initializing Wine prefix..."
 export WINEPREFIX=/opt/mt5master
 export WINEARCH=win64
@@ -159,8 +190,9 @@ mkdir -p $WINEPREFIX
 xvfb-run -a wineboot -u >/dev/null 2>&1
 echo "    -> Wine prefix initialized."
 
-echo "    -> Running silent MT5 install (wait up to 5 minutes)..."
-xvfb-run -a wine /tmp/mt5setup.exe /auto &
+# mt5setup.exe pulls MT5 components from CDN at install time — must also go via Tor
+echo "    -> Running silent MT5 install via Tor (wait up to 5 minutes)..."
+proxychains4 -q xvfb-run -a wine /tmp/mt5setup.exe /auto &
 INSTALL_PID=$!
 
 for i in {1..60}; do
@@ -182,7 +214,9 @@ sleep 3
 MT5_DIR=$(find $WINEPREFIX -name "metatester64.exe" -exec dirname {} \; 2>/dev/null | head -1)
 if [ -z "$MT5_DIR" ]; then
     echo "ERROR: MT5 installation failed. metatester64.exe not found."
-    echo "  Cached installer may be corrupt. Delete and re-run:"
+    echo "  Possible cause: Tor circuit dropped during install."
+    echo "  Try: systemctl restart tor && sleep 10 && bash $0 $*"
+    echo "  Or delete cached installer to force fresh download:"
     echo "  rm $SETUP_FILE && bash $0 $*"
     exit 1
 fi
@@ -190,7 +224,7 @@ echo "    -> Installed at: $MT5_DIR"
 
 # --- [6/8] CLEAR CLOUD.PING ---
 echo "==> [6/8] Clearing Cloud.Ping cache for clean cloud connection..."
-# Use HKCU (mapped to running user) — not HKEY_USERS\S-1-5-18 (SYSTEM account)
+# Use HKCU (current user) — not HKEY_USERS\S-1-5-18 (SYSTEM account)
 WINEPREFIX="$WINEPREFIX" WINEARCH=win64 wine reg delete \
     "HKCU\\Software\\MetaQuotes Software\\Cloud.Ping" \
     /f >/dev/null 2>&1 || true
@@ -249,8 +283,7 @@ for P in $(seq $SP $EP); do
         chmod 600 "$CONFIG_DIR/metatester.ini"
     fi
 
-    # Write a dedicated per-agent launcher script
-    # This avoids nested quoting breakage in start-all.sh
+    # Dedicated per-agent launcher script — avoids nested quoting in start-all.sh
     AGENT_SCRIPT="/opt/mt5/run-agent-$P.sh"
     # Deterministic Xvfb display: port 3000=:10, 3001=:11, etc.
     DISP=$((P - 2990))
@@ -272,13 +305,13 @@ AGENTEOF
     screen -dmS "mt5-$P" bash "$AGENT_SCRIPT"
     echo "      -> Agent $P launched: screen -r mt5-$P"
 
-    # Append clean single-line call to start-all.sh (no quoting issues)
+    # Append clean single-line call — no nested quoting issues
     echo "screen -dmS mt5-$P bash '$AGENT_SCRIPT'" >> /opt/mt5/start-all.sh
 done
 
 chmod +x /opt/mt5/start-all.sh
 
-# @reboot — 45s delay ensures network + fstab mounts are ready
+# @reboot — 45s delay ensures network + fstab mounts are ready before agents start
 (crontab -l 2>/dev/null | grep -v mt5; \
     echo "@reboot sleep 45 && /usr/local/bin/clear-ram-cache.sh && /opt/mt5/start-all.sh") | crontab -
 echo "    -> @reboot cron added (45s boot delay for network readiness)."
