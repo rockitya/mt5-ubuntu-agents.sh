@@ -27,7 +27,6 @@ sudo systemctl daemon-reload
 echo "==> [2/7] Verifying Dependencies (Adding Headless Window Manager)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
-# THE FIX: Added 'fluxbox' - a micro window manager that provides the OLE interfaces Wine is crashing over
 sudo apt-get install -y wine32 wine64 xvfb fluxbox wget cabextract winbind net-tools >/dev/null 2>&1
 
 echo "==> [3/7] Setting up 64GB Swap & Network..."
@@ -48,7 +47,6 @@ MASTER_WP="/opt/mt5master"
 sudo mkdir -p "$MASTER_WP"
 sudo chown -R mt5user:mt5user "$MASTER_WP"
 
-# Initialize Wine
 sudo -u mt5user env WINEPREFIX="$MASTER_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [5/7] Downloading metatester64.exe..."
@@ -93,35 +91,28 @@ SellComputingResources=1
 INI
     fi
 
-    # THE FIX: Create a dedicated launch script for each agent that pairs Fluxbox and Wine perfectly
+    # THE FIX: This wrapper script allows xvfb-run to seamlessly run both apps with perfect X11 Security Cookies
     LAUNCH_SCRIPT="/opt/mt5agent-$P/launch.sh"
     cat << EOF | sudo tee "$LAUNCH_SCRIPT" >/dev/null
 #!/bin/bash
 export WINEPREFIX="$AGENT_WP"
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
-export DISPLAY=:$P
 
-# Start dedicated virtual monitor
-Xvfb :$P -screen 0 1024x768x16 &
-XVFB_PID=\$!
-sleep 2
-
-# Start Fluxbox Window Manager so OLE/COM has an interface to bind to
-fluxbox &
+# Start the micro window manager in the background
+/usr/bin/fluxbox &
 FLUX_PID=\$!
 sleep 2
 
-# Launch MetaTester natively in this environment
-wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
+# Launch MetaTester natively in the foreground
+/usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
 
-# Cleanup if exited
-kill \$FLUX_PID \$XVFB_PID
+kill \$FLUX_PID 2>/dev/null || true
 EOF
     sudo chmod +x "$LAUNCH_SCRIPT"
     sudo chown mt5user:mt5user "$LAUNCH_SCRIPT"
 
-    # THE FIX: SystemD now just calls our clean launch script
+    # THE FIX: Wrap the launch script completely inside the secure xvfb-run display generator
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -131,7 +122,8 @@ After=network.target
 Type=simple
 User=mt5user
 Group=mt5user
-ExecStart=$LAUNCH_SCRIPT
+LimitNOFILE=65536
+ExecStart=/usr/bin/xvfb-run -a $LAUNCH_SCRIPT
 Restart=always
 RestartSec=10
 SendSIGKILL=no
