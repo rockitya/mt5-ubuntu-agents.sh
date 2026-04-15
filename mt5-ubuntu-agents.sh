@@ -38,27 +38,24 @@ if ! swapon --show | grep -q "/swapfile"; then
     sudo swapon /swapfile || true
 fi
 
-cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
-net.ipv4.tcp_keepalive_time=60
-net.ipv4.tcp_keepalive_intvl=10
-net.ipv4.tcp_keepalive_probes=6
-net.ipv4.tcp_fin_timeout=30
-net.core.somaxconn=1024
-fs.file-max=1000000
-vm.swappiness=60
-EOF
-sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
+# THE FIX: Create a dedicated, non-root user so MetaTester doesn't self-terminate
+echo "==> [4/7] Creating Dedicated 'mt5user' & Initializing Wine Environment..."
+if ! id "mt5user" &>/dev/null; then
+    sudo useradd -m -s /bin/bash mt5user
+fi
 
-echo "==> [4/7] Initializing Root Wine Environment..."
 MASTER_WP="/opt/mt5master"
 sudo mkdir -p "$MASTER_WP"
-sudo env WINEPREFIX="$MASTER_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wineboot -u >/dev/null 2>&1
+sudo chown -R mt5user:mt5user "$MASTER_WP"
+
+# Initialize Wine strictly as the mt5user
+sudo -u mt5user env WINEPREFIX="$MASTER_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [5/7] Downloading metatester64.exe..."
 MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
-sudo mkdir -p "$(dirname "$MASTER_EX")"
-sudo wget --show-progress -q -O "$MASTER_EX" "https://github.com/rockitya/mt5-ubuntu-agents.sh/raw/main/metatester64.exe"
-sudo chmod +x "$MASTER_EX"
+sudo -u mt5user mkdir -p "$(dirname "$MASTER_EX")"
+sudo -u mt5user wget --show-progress -q -O "$MASTER_EX" "https://github.com/rockitya/mt5-ubuntu-agents.sh/raw/main/metatester64.exe"
+sudo -u mt5user chmod +x "$MASTER_EX"
 
 echo "==> [6/7] Deploying SystemD Agents..."
 SP=3000
@@ -68,24 +65,25 @@ for P in $(seq $SP $EP); do
     echo "    -> Configuring Agent on port $P..."
     AGENT_WP="/opt/mt5agent-$P"
     sudo cp -r "$MASTER_WP" "$AGENT_WP"
+    sudo chown -R mt5user:mt5user "$AGENT_WP"
     AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 
     ACCOUNT_FLAG=""
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
         
-        cat <<REG | sudo tee "$AGENT_WP/cloud.reg" >/dev/null
+        cat <<REG | sudo -u mt5user tee "$AGENT_WP/cloud.reg" >/dev/null
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
 "Login"="$MQL5_LOGIN"
 "SellComputingResources"=dword:00000001
 REG
         
-        sudo env WINEPREFIX="$AGENT_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
+        sudo -u mt5user env WINEPREFIX="$AGENT_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
 
-        CONFIG_DIR="$AGENT_WP/drive_c/users/root/AppData/Roaming/MetaQuotes/Tester"
-        sudo mkdir -p "$CONFIG_DIR"
-        cat <<INI | sudo tee "$CONFIG_DIR/metatester.ini" >/dev/null
+        CONFIG_DIR="$AGENT_WP/drive_c/users/mt5user/AppData/Roaming/MetaQuotes/Tester"
+        sudo -u mt5user mkdir -p "$CONFIG_DIR"
+        cat <<INI | sudo -u mt5user tee "$CONFIG_DIR/metatester.ini" >/dev/null
 [Tester]
 Port=$P
 Password=$PW
@@ -95,7 +93,7 @@ SellComputingResources=1
 INI
     fi
 
-    # THE FIX: Added Type=simple, SendSIGKILL=no, and TimeoutStopSec to prevent SystemD from assassinating Wine
+    # THE FIX: Run the background service as 'mt5user', passing all security checks
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -103,8 +101,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=mt5user
+Group=mt5user
 Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
 Environment=WINEDLLOVERRIDES="mscoree,mshtml="
@@ -113,7 +111,6 @@ ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /pa
 Restart=always
 RestartSec=10
 SendSIGKILL=no
-TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
