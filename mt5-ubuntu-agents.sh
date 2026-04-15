@@ -8,7 +8,7 @@ if [ -z "$1" ]; then
 else
     REQUESTED_CORES=$1
     if [ "$REQUESTED_CORES" -ge "$TOTAL_CORES" ] && [ "$TOTAL_CORES" -gt 1 ]; then
-        echo "WARNING: Reserving 1 core for OS stability to prevent Cloud disconnects."
+        echo "WARNING: Reserving 1 core for OS stability."
         REQUESTED_CORES=$((TOTAL_CORES - 1))
     fi
 fi
@@ -35,31 +35,19 @@ sudo apt-get autoremove -y >/dev/null 2>&1 || true
 
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; done
 
-# -------------------------------------------------------------
-# MASSIVE 64GB SWAP FILE CREATION
-# -------------------------------------------------------------
 echo "==> [3/8] Creating 64GB Swap File (Max RAM Protection)..."
-# Check if a smaller swapfile already exists and turn it off
 if swapon --show | grep -q "/swapfile"; then
-    echo "    Disabling old swap..."
-    sudo swapoff /swapfile || true
-    sudo rm -f /swapfile || true
+    echo "    Swap active. Skipping."
+else
+    echo "    Allocating 64GB of disk space..."
+    sudo fallocate -l 64G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
+    sudo chmod 600 /swapfile || true
+    sudo mkswap /swapfile || true
+    sudo swapon /swapfile || true
+    if ! grep -q "/swapfile none swap" /etc/fstab; then
+        echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null || true
+    fi
 fi
-
-echo "    Allocating 64GB of disk space (This might take a few minutes depending on SSD speed)..."
-# Using 'fallocate' is fastest. If it fails, fallback to 'dd' to write zeros.
-sudo fallocate -l 64G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
-
-sudo chmod 600 /swapfile || true
-sudo mkswap /swapfile || true
-sudo swapon /swapfile || true
-
-# Add to fstab if not already there so it survives reboots
-if ! grep -q "/swapfile none swap" /etc/fstab; then
-    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null || true
-fi
-echo "    64GB Swap active!"
-# -------------------------------------------------------------
 
 echo "==> [4/8] Optimizing TCP Keep-Alive & File Limits..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
@@ -69,7 +57,6 @@ net.ipv4.tcp_keepalive_probes=6
 net.ipv4.tcp_fin_timeout=30
 net.core.somaxconn=1024
 fs.file-max=1000000
-# Tell Linux to aggressively use the 64GB swap file when RAM fills up
 vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
@@ -114,17 +101,24 @@ for P in $(seq $SP $EP); do
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
         
+        # THE FIX: Inject the registry keys into BOTH the Current User and the Wine SYSTEM account (S-1-5-18)
+        # This guarantees the background service will detect the 'Sell' checkbox is ticked.
         cat <<REG > "$AGENT_WP/cloud.reg"
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
+"Login"="$MQL5_LOGIN"
+"SellComputingResources"=dword:00000001
+[HKEY_USERS\S-1-5-18\Software\MetaQuotes\MetaTester]
 "Login"="$MQL5_LOGIN"
 "SellComputingResources"=dword:00000001
 REG
         WINEPREFIX="$AGENT_WP" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
     fi
 
+    # Install the agent (Only pass the account flag during the initial installation setup)
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG >/dev/null 2>&1
     
+    # Run the background service (Do NOT pass the account flag here, it crashes the normal boot sequence)
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -135,7 +129,7 @@ Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
 LimitNOFILE=65536
 ExecStartPre=-/usr/bin/xvfb-run -a /usr/bin/wine reg delete "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" /f
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW
 Restart=always
 RestartSec=10
 
@@ -157,6 +151,8 @@ echo "========================================="
 echo "✓ SUCCESS! Stable Agents active on ports:"
 ss -tuln | grep -E "30[0-9]{2}|3100" | awk '{print $5}'
 echo "========================================="
-echo "Total System Memory + Swap:"
-free -h | grep -E "Mem|Swap"
-echo "========================================="
+echo "VPS IP  : $(hostname -I | awk '{print $1}')"
+echo "Password: $PW"
+if [ ! -z "$MQL5_LOGIN" ]; then
+    echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
+fi
