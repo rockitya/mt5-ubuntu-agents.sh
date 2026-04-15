@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# Accept inline arguments: 1=Cores, 2=Password, 3=MQL5_Login
 TOTAL_CORES=$(nproc)
 if [ -z "$1" ]; then
     REQUESTED_CORES=$((TOTAL_CORES > 1 ? TOTAL_CORES - 1 : 1))
@@ -19,9 +18,7 @@ MQL5_LOGIN=$3
 export DEBIAN_FRONTEND=noninteractive
 
 echo "==> [1/7] Cleaning up old Wine & SystemD installations..."
-# Stop old local services
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
-# Remove problematic Wine installs from host
 sudo apt-get remove --purge -y wine* xvfb >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
 sudo rm -rf /opt/mt5agent-* /opt/mt5master >/dev/null 2>&1 || true
@@ -60,9 +57,12 @@ EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
 echo "==> [5/7] Building Custom MT5 Docker Image (Takes 1-2 minutes)..."
-# We build a lightweight, self-contained image on the fly to guarantee compatibility
-mkdir -p /opt/mt5-docker
-cat << 'EOF' > /opt/mt5-docker/Dockerfile
+# THE FIX: Create a completely empty, isolated build directory so Docker doesn't hang
+sudo rm -rf /tmp/mt5-docker-build
+mkdir -p /tmp/mt5-docker-build
+cd /tmp/mt5-docker-build
+
+cat << 'EOF' > Dockerfile
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WINEARCH=win64
@@ -73,11 +73,12 @@ RUN dpkg --add-architecture i386 && \
     rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /mt5 && \
     wget -q -nc -O /mt5/metatester64.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/metatester64.exe"
-# Start the agent natively using the config file mapped to the Z: drive
 ENTRYPOINT ["xvfb-run", "-a", "wine", "/mt5/metatester64.exe", "/config:Z:\\mt5\\config.ini"]
 EOF
 
-sudo docker build -t mt5-cloud-agent /opt/mt5-docker >/dev/null 2>&1
+# Run build in the isolated directory
+sudo docker build -t mt5-cloud-agent . >/dev/null 2>&1
+cd ~
 
 echo "==> [6/7] Deploying Containerized Cloud Agents..."
 SP=3000
@@ -88,7 +89,6 @@ for P in $(seq $SP $EP); do
     DIR="/opt/mt5-configs/node_$P"
     sudo mkdir -p "$DIR"
     
-    # Generate the absolute source-of-truth config file
     cat <<INI | sudo tee "$DIR/config.ini" >/dev/null
 [Tester]
 Port=$P
@@ -98,10 +98,8 @@ Login=$MQL5_LOGIN
 SellComputingResources=1
 INI
 
-    # Stop any existing container on this port
     sudo docker rm -f mt5-agent-$P >/dev/null 2>&1 || true
     
-    # Launch the agent in the background, mapping the config file directly into it
     sudo docker run -d \
         --name mt5-agent-$P \
         --net=host \
@@ -126,5 +124,6 @@ if [ ! -z "$MQL5_LOGIN" ]; then
     echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
 fi
 echo "========================================="
-echo "To view live cloud connection logs for Port 3000, run:"
-echo "sudo docker logs -f mt5-agent-3000"
+echo "Reading live cloud connection logs for Port 3000..."
+sleep 3
+sudo docker logs mt5-agent-3000
