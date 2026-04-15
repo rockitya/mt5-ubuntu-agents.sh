@@ -17,24 +17,44 @@ MQL5_LOGIN=$3
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "==> [1/7] Cleaning up old installations..."
+echo "==> [1/8] Disabling Firewall & Stopping Auto-Updates..."
+# Disable Ubuntu Firewall
+sudo ufw disable >/dev/null 2>&1 || true
+sudo iptables -F >/dev/null 2>&1 || true
+
+# Stop background updaters that cause silent freezes
+sudo systemctl stop apt-daily.timer 2>/dev/null || true
+sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
+sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
+
+# Wait safely if dpkg is locked by the system
+while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    echo "    Waiting for Ubuntu background updates to release the dpkg lock..."
+    sleep 5
+done
+sudo dpkg --configure -a >/dev/null 2>&1 || true
+
+echo "==> [2/8] Cleaning up old local Wine installations..."
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
 sudo apt-get remove --purge -y wine* xvfb >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
 sudo rm -rf /opt/mt5agent-* /opt/mt5master /tmp/mt5-docker-build >/dev/null 2>&1 || true
 
-echo "==> [2/7] Installing Docker..."
+echo "==> [3/8] Installing Docker (Logs enabled so you can see progress)..."
 if ! command -v docker &> /dev/null; then
-    curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1
+    # Removed the silent flag so you can actually watch Docker install
+    curl -fsSL https://get.docker.com | sudo sh
+else
+    echo "    Docker is already installed."
 fi
-sudo systemctl enable docker >/dev/null 2>&1
-sudo systemctl start docker >/dev/null 2>&1
+sudo systemctl enable docker >/dev/null 2>&1 || true
+sudo systemctl start docker >/dev/null 2>&1 || true
 
-echo "==> [3/7] Creating 64GB Swap File (Max RAM Protection)..."
+echo "==> [4/8] Creating 64GB Swap File (Max RAM Protection)..."
 if swapon --show | grep -q "/swapfile"; then
     echo "    Swap active. Skipping."
 else
-    echo "    Allocating 64GB of disk space..."
+    echo "    Allocating 64GB of disk space (This may take a few minutes)..."
     sudo fallocate -l 64G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
     sudo chmod 600 /swapfile || true
     sudo mkswap /swapfile || true
@@ -44,7 +64,7 @@ else
     fi
 fi
 
-echo "==> [4/7] Optimizing Host Network..."
+echo "==> [5/8] Optimizing Host Network..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
@@ -56,8 +76,7 @@ vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [5/7] Building Custom MT5 Docker Image..."
-echo "    (You will now see the live build logs so you know it isn't paused!)"
+echo "==> [6/8] Building Custom MT5 Docker Image..."
 mkdir -p /tmp/mt5-docker-build
 cd /tmp/mt5-docker-build
 
@@ -75,11 +94,10 @@ RUN mkdir -p /mt5 && \
 ENTRYPOINT ["xvfb-run", "-a", "wine", "/mt5/metatester64.exe", "/config:Z:\\mt5\\config.ini"]
 EOF
 
-# THE FIX: '--network=host' forces Docker to use the VPS network adapter, bypassing the MTU packet-drop bug!
 sudo docker build --network=host -t mt5-cloud-agent .
 cd ~
 
-echo "==> [6/7] Deploying Containerized Cloud Agents..."
+echo "==> [7/8] Deploying Containerized Cloud Agents..."
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
@@ -88,6 +106,7 @@ for P in $(seq $SP $EP); do
     DIR="/opt/mt5-configs/node_$P"
     sudo mkdir -p "$DIR"
     
+    # 100% accurate cloud instruction mapping
     cat <<INI | sudo tee "$DIR/config.ini" >/dev/null
 [Tester]
 Port=$P
@@ -99,6 +118,7 @@ INI
 
     sudo docker rm -f mt5-agent-$P >/dev/null 2>&1 || true
     
+    # Launch Docker mapped directly to the Host network
     sudo docker run -d \
         --name mt5-agent-$P \
         --net=host \
@@ -108,7 +128,7 @@ INI
         mt5-cloud-agent >/dev/null 2>&1
 done
 
-echo "==> [7/7] Finalizing..."
+echo "==> [8/8] Finalizing..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 sleep 6
 
@@ -123,5 +143,5 @@ if [ ! -z "$MQL5_LOGIN" ]; then
     echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
 fi
 echo "========================================="
-echo "Wait 2 minutes, then view the cloud connection logs using:"
+echo "Wait 2 minutes, then view the exact cloud connection logs using:"
 echo "sudo docker logs -f mt5-agent-3000"
