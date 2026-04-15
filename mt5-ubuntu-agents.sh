@@ -49,7 +49,7 @@ UBUNTU_VER=$(lsb_release -cs)
 wget -q -NP /etc/apt/sources.list.d/ \
     "https://dl.winehq.org/wine-builds/ubuntu/dists/$UBUNTU_VER/winehq-$UBUNTU_VER.sources"
 apt-get update -y >/dev/null
-apt-get install -y --install-recommends winehq-devel xvfb screen wget net-tools cabextract >/dev/null 2>&1
+apt-get install -y --install-recommends winehq-devel xvfb screen wget net-tools cabextract python3-pip >/dev/null 2>&1
 echo "    -> $(wine --version)"
 
 # --- [3/8] SWAP 64GB PERSISTENT ---
@@ -84,8 +84,8 @@ chmod +x /usr/local/bin/clear-ram-cache.sh
 (crontab -l 2>/dev/null | grep -v clear-ram-cache; echo "*/30 * * * * /usr/local/bin/clear-ram-cache.sh") | crontab -
 echo "    -> RAM cache cleared now. Auto-clear every 30 min via cron."
 
-# --- [5/8] MT5 FULL INSTALL FROM GITHUB ---
-echo "==> [5/8] Downloading mt5setup.exe from GitHub..."
+# --- [5/8] MT5 FULL INSTALL ---
+echo "==> [5/8] Downloading mt5setup.exe from Google Drive..."
 export WINEPREFIX=/opt/mt5master
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
@@ -94,11 +94,42 @@ mkdir -p $WINEPREFIX
 xvfb-run -a wineboot -u >/dev/null 2>&1
 echo "    -> Wine prefix initialized."
 
-wget -q --show-progress \
-    -O /tmp/mt5setup.exe \
-    "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5setup.exe"
-echo "    -> mt5setup.exe downloaded. Running silent install..."
+# Install gdown for reliable Google Drive downloads
+pip3 install -q gdown
 
+GDRIVE_ID="1XMi5YbCtyeiJFlSbflJjbUFV-sIQI4TC"
+
+echo "    -> Downloading via gdown..."
+gdown --id "$GDRIVE_ID" -O /tmp/mt5setup.exe || true
+
+# Verify file is a real exe (must be > 1MB)
+FILESIZE=$(stat -c%s /tmp/mt5setup.exe 2>/dev/null || echo 0)
+if [ "$FILESIZE" -lt 1000000 ]; then
+    echo "    -> gdown failed (${FILESIZE} bytes). Trying wget fallback..."
+    wget -q --show-progress \
+        --tries=3 --timeout=120 \
+        --save-cookies /tmp/gdrive_cookies.txt \
+        --keep-session-cookies \
+        "https://drive.google.com/uc?export=download&id=$GDRIVE_ID" \
+        -O /tmp/gdrive_confirm.html || true
+    CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/gdrive_confirm.html 2>/dev/null | head -1 | cut -d= -f2 || echo "t")
+    wget -q --show-progress \
+        --tries=3 --timeout=120 \
+        --load-cookies /tmp/gdrive_cookies.txt \
+        "https://drive.google.com/uc?export=download&id=$GDRIVE_ID&confirm=$CONFIRM" \
+        -O /tmp/mt5setup.exe || true
+    FILESIZE=$(stat -c%s /tmp/mt5setup.exe 2>/dev/null || echo 0)
+fi
+
+if [ "$FILESIZE" -lt 1000000 ]; then
+    echo "ERROR: mt5setup.exe download failed. File is only ${FILESIZE} bytes."
+    echo "  Manual fix: scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):/tmp/mt5setup.exe"
+    echo "  Then re-run this script — it will skip the download if /tmp/mt5setup.exe exists."
+    exit 1
+fi
+echo "    -> mt5setup.exe ready: $(du -sh /tmp/mt5setup.exe | cut -f1)"
+
+echo "    -> Running silent install..."
 xvfb-run -a wine /tmp/mt5setup.exe /auto &
 INSTALL_PID=$!
 
@@ -152,7 +183,7 @@ for P in $(seq $SP $EP); do
     AGENT_EX=$(find $AGENT_WP -name "metatester64.exe" 2>/dev/null | head -1)
     AGENT_WIN_EX="$(echo "$AGENT_EX" | sed "s|$AGENT_WP/drive_c|C:|" | sed 's|/|\\|g')"
 
-    # Clear Cloud.Ping in each agent's prefix
+    # Clear Cloud.Ping in each agent prefix
     WINEPREFIX="$AGENT_WP" WINEARCH=win64 wine reg add \
         "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" \
         /ve /t REG_SZ /d "" /f >/dev/null 2>&1 || true
@@ -185,8 +216,6 @@ for P in $(seq $SP $EP); do
 done
 
 chmod +x /opt/mt5/start-all.sh
-
-# @reboot: clear RAM then start all agents
 (crontab -l 2>/dev/null | grep -v mt5; \
     echo "@reboot sleep 20 && /usr/local/bin/clear-ram-cache.sh && /opt/mt5/start-all.sh") | crontab -
 echo "    -> @reboot cron added."
