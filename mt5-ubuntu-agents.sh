@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+
 # MT5 Ubuntu Cloud Agents — Full Setup Script
 # Usage: bash mt5-ubuntu-agents.sh [CORES] [PASSWORD] [MQL5_LOGIN]
 # Example: bash mt5-ubuntu-agents.sh 7 Prem@1996 rcktya
@@ -27,6 +28,7 @@ echo "============================================="
 # --- [1/8] WIPE ---
 echo "==> [1/8] NUCLEAR WIPE..."
 screen -ls 2>/dev/null | grep mt5 | awk '{print $1}' | xargs -I{} screen -X -S {} quit 2>/dev/null || true
+screen -wipe 2>/dev/null || true
 pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f wineserver 2>/dev/null || true
 pkill -9 -f Xvfb 2>/dev/null || true
@@ -38,7 +40,7 @@ crontab -l 2>/dev/null | grep -v mt5 | grep -v clear-ram | crontab - 2>/dev/null
 rm -f /usr/local/bin/clear-ram-cache.sh 2>/dev/null || true
 echo "    -> Done."
 
-# --- [2/8] WINE ---
+# --- [2/8] WINE DEVEL ---
 echo "==> [2/8] Installing WineHQ Devel..."
 dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings
@@ -50,8 +52,8 @@ apt-get update -y >/dev/null
 apt-get install -y --install-recommends winehq-devel xvfb screen wget net-tools cabextract >/dev/null 2>&1
 echo "    -> $(wine --version)"
 
-# --- [3/8] SWAP ---
-echo "==> [3/8] Setting up 64GB Swap (persistent)..."
+# --- [3/8] SWAP 64GB PERSISTENT ---
+echo "==> [3/8] Setting up 64GB Swap (persistent across reboots)..."
 swapoff -a 2>/dev/null || true
 rm -f /swapfile 2>/dev/null || true
 fallocate -l 64G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
@@ -67,9 +69,10 @@ net.core.somaxconn=1024
 fs.file-max=1000000
 EOF
 sysctl -p /etc/sysctl.d/99-mt5.conf >/dev/null 2>&1 || true
-echo "    -> $(free -h | grep Swap) — persisted in /etc/fstab"
+echo "    -> Swap active and persisted in /etc/fstab"
+free -h | grep Swap
 
-# --- [4/8] RAM CACHE ---
+# --- [4/8] RAM CACHE CRON ---
 echo "==> [4/8] Scheduling RAM cache auto-clear every 30 minutes..."
 cat > /usr/local/bin/clear-ram-cache.sh << 'EOF'
 #!/bin/bash
@@ -81,19 +84,19 @@ chmod +x /usr/local/bin/clear-ram-cache.sh
 (crontab -l 2>/dev/null | grep -v clear-ram-cache; echo "*/30 * * * * /usr/local/bin/clear-ram-cache.sh") | crontab -
 echo "    -> RAM cache cleared now. Auto-clear every 30 min via cron."
 
-# --- [5/8] MT5 FULL INSTALL ---
-echo "==> [5/8] Downloading & Installing FULL MT5 Suite (~2-3 minutes)..."
+# --- [5/8] MT5 FULL INSTALL FROM GITHUB ---
+echo "==> [5/8] Downloading mt5setup.exe from GitHub..."
 export WINEPREFIX=/opt/mt5master
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
 mkdir -p $WINEPREFIX
+
 xvfb-run -a wineboot -u >/dev/null 2>&1
 echo "    -> Wine prefix initialized."
 
 wget -q --show-progress \
-    --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" \
     -O /tmp/mt5setup.exe \
-    "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+    "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/mt5setup.exe"
 echo "    -> mt5setup.exe downloaded. Running silent install..."
 
 xvfb-run -a wine /tmp/mt5setup.exe /auto &
@@ -119,15 +122,15 @@ kill $INSTALL_PID 2>/dev/null || true
 pkill -f mt5setup 2>/dev/null || true
 sleep 3
 
-# --- [6/8] CLOUD.PING CLEAR ---
+# --- [6/8] CLEAR CLOUD.PING ---
 echo "==> [6/8] Clearing Cloud.Ping cache for clean cloud connection..."
 WINEPREFIX="$WINEPREFIX" WINEARCH=win64 wine reg add \
     "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" \
     /ve /t REG_SZ /d "" /f >/dev/null 2>&1 || true
 echo "    -> Cloud.Ping cache cleared."
 
-# --- [7/8] DEPLOY AGENTS ---
-echo "==> [7/8] Cloning master and launching $REQUESTED_CORES agents..."
+# --- [7/8] CLONE & LAUNCH AGENTS ---
+echo "==> [7/8] Cloning master prefix and launching $REQUESTED_CORES agents..."
 mkdir -p /opt/mt5
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
@@ -135,6 +138,7 @@ EP=$((SP + REQUESTED_CORES - 1))
 cat > /opt/mt5/start-all.sh << 'STARTEOF'
 #!/bin/bash
 screen -ls 2>/dev/null | grep mt5 | awk '{print $1}' | xargs -I{} screen -X -S {} quit 2>/dev/null || true
+screen -wipe 2>/dev/null || true
 pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f wineserver 2>/dev/null || true
 sleep 5
@@ -148,7 +152,7 @@ for P in $(seq $SP $EP); do
     AGENT_EX=$(find $AGENT_WP -name "metatester64.exe" 2>/dev/null | head -1)
     AGENT_WIN_EX="$(echo "$AGENT_EX" | sed "s|$AGENT_WP/drive_c|C:|" | sed 's|/|\\|g')"
 
-    # Clear Cloud.Ping in each agent prefix
+    # Clear Cloud.Ping in each agent's prefix
     WINEPREFIX="$AGENT_WP" WINEARCH=win64 wine reg add \
         "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" \
         /ve /t REG_SZ /d "" /f >/dev/null 2>&1 || true
@@ -175,15 +179,17 @@ for P in $(seq $SP $EP); do
         xvfb-run --auto-servernum --server-args='-screen 0 1024x768x24' \
             wine '$AGENT_WIN_EX' /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
     "
-    echo "      -> Agent $P launched in screen session: mt5-$P"
+    echo "      -> Agent $P launched: screen mt5-$P"
 
     echo "screen -dmS mt5-$P bash -c \"export WINEPREFIX=$AGENT_WP; export WINEARCH=win64; export WINEDLLOVERRIDES='mscoree,mshtml='; xvfb-run --auto-servernum --server-args='-screen 0 1024x768x24' wine '$AGENT_WIN_EX' /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG\"" >> /opt/mt5/start-all.sh
 done
 
 chmod +x /opt/mt5/start-all.sh
+
+# @reboot: clear RAM then start all agents
 (crontab -l 2>/dev/null | grep -v mt5; \
     echo "@reboot sleep 20 && /usr/local/bin/clear-ram-cache.sh && /opt/mt5/start-all.sh") | crontab -
-echo "    -> @reboot cron added (agents + RAM clear on every boot)."
+echo "    -> @reboot cron added."
 
 # --- [8/8] VERIFY ---
 echo "==> [8/8] Waiting for agents to come online (up to 5 minutes)..."
@@ -197,17 +203,17 @@ for i in {1..60}; do
         echo "============================================="
         [ ! -z "$MQL5_LOGIN" ] && echo "  Cloud: ENABLED for account '$MQL5_LOGIN'"
         echo ""
-        echo "  Useful commands:"
-        echo "    screen -ls                          (see all sessions)"
+        echo "  Commands:"
+        echo "    screen -ls                          (list all sessions)"
         echo "    screen -r mt5-3000                  (watch agent live)"
         echo "    Ctrl+A then D                       (detach from screen)"
         echo "    /opt/mt5/start-all.sh               (restart all agents)"
         echo "    /usr/local/bin/clear-ram-cache.sh   (clear RAM manually)"
         echo ""
-        echo "  Check cloud ping (wait ~3 minutes after start):"
+        echo "  After 3 minutes check cloud ping:"
         echo "    screen -r mt5-3000"
         echo "    (look for: Network server agentX.mql5.net ping XX ms)"
-        echo "    Verify online: https://cloud.mql5.com"
+        echo "    Also verify: https://cloud.mql5.com"
         echo "============================================="
         exit 0
     fi
