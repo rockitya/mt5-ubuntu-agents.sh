@@ -110,21 +110,9 @@ Windows Registry Editor Version 5.00
 "SellComputingResources"=dword:00000001
 REG
         WINEPREFIX="$AGENT_WP" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
-
-        CONFIG_DIR="$AGENT_WP/drive_c/users/root/AppData/Roaming/MetaQuotes/Tester"
-        mkdir -p "$CONFIG_DIR"
-        
-        cat <<INI > "$CONFIG_DIR/metatester.ini"
-[Tester]
-Port=$P
-Password=$PW
-[Cloud]
-Login=$MQL5_LOGIN
-SellComputingResources=1
-INI
     fi
     
-    # THE FIX: $ACCOUNT_FLAG is now explicitly added to the ExecStart command!
+    # THE FIX: Added /install to the ExecStart line to prevent the agent from instantly shutting down with code 0!
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -135,7 +123,7 @@ Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
 LimitNOFILE=65536
 ExecStartPre=-/usr/bin/xvfb-run -a /usr/bin/wine reg delete "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" /f
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
 Restart=always
 RestartSec=10
 
