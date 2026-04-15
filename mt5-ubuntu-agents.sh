@@ -16,42 +16,34 @@ PW=${2:-"MetaTester"}
 MQL5_LOGIN=$3
 export DEBIAN_FRONTEND=noninteractive
 
-echo "==> [1/7] NUCLEAR WIPE: Removing broken Wine & old installs..."
+echo "==> [1/7] NUCLEAR WIPE..."
 sudo killall -9 wine wineserver Xvfb xvfb-run metatester64.exe fluxbox 2>/dev/null || true
 for P in $(seq 3000 3100); do
     sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true
     sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true
 done
 sudo rm -rf /opt/mt5* /tmp/mt5* ~/.wine /root/.wine /home/mt5user/.wine /etc/systemd/system/mt5-agent* 2>/dev/null || true
-sudo systemctl daemon-reload
-
-# Purge Ubuntu's broken Wine completely
 sudo apt-get remove --purge -y wine* 2>/dev/null || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
+sudo systemctl daemon-reload
 
-echo "==> [2/7] Installing Official WineHQ Stable (Full COM/OLE Support)..."
+echo "==> [2/7] Installing Official WineHQ Stable..."
 sudo dpkg --add-architecture i386
 sudo mkdir -pm755 /etc/apt/keyrings
-sudo wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
-
-# Detect Ubuntu version and add correct repo
+sudo wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
 UBUNTU_VER=$(lsb_release -cs)
-sudo wget -NP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/ubuntu/dists/$UBUNTU_VER/winehq-$UBUNTU_VER.sources"
-
+sudo wget -q -NP /etc/apt/sources.list.d/ \
+    "https://dl.winehq.org/wine-builds/ubuntu/dists/$UBUNTU_VER/winehq-$UBUNTU_VER.sources"
 sudo apt-get update -y >/dev/null
-# THE FIX: Install winehq-stable - the ONLY Wine build with a working COM/OLE/RPC stack
-sudo apt-get install -y --install-recommends winehq-stable xvfb wget fluxbox net-tools >/dev/null 2>&1
-
-echo "    -> Confirming Wine version..."
-wine --version
+sudo apt-get install -y --install-recommends winehq-stable xvfb wget net-tools >/dev/null 2>&1
+echo "    -> $(wine --version)"
 
 echo "==> [3/7] Setting up 64GB Swap & Network..."
 if ! swapon --show | grep -q "/swapfile"; then
     sudo fallocate -l 64G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
     sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile || true
 fi
-
-cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
+cat <<EOF | sudo tee /etc/sysctl.d/99-mt5.conf >/dev/null
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
 net.ipv4.tcp_keepalive_probes=6
@@ -60,24 +52,24 @@ net.core.somaxconn=1024
 fs.file-max=1000000
 vm.swappiness=60
 EOF
-sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
+sudo sysctl -p /etc/sysctl.d/99-mt5.conf >/dev/null 2>&1 || true
 
-echo "==> [4/7] Creating 'mt5user' & Initializing Wine Environment..."
+echo "==> [4/7] Creating 'mt5user' & Initializing Wine..."
 if ! id "mt5user" &>/dev/null; then
     sudo useradd -m -s /bin/bash mt5user
 fi
-
 MASTER_WP="/opt/mt5master"
 sudo mkdir -p "$MASTER_WP"
 sudo chown -R mt5user:mt5user "$MASTER_WP"
-
-sudo -u mt5user env WINEPREFIX="$MASTER_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wineboot -u >/dev/null 2>&1
-echo "    -> Wine prefix created successfully."
+sudo -u mt5user env WINEPREFIX="$MASTER_WP" WINEARCH=win64 \
+    WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wineboot -u >/dev/null 2>&1
+echo "    -> Wine prefix initialized."
 
 echo "==> [5/7] Downloading metatester64.exe..."
 MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 sudo -u mt5user mkdir -p "$(dirname "$MASTER_EX")"
-sudo -u mt5user wget --show-progress -q -O "$MASTER_EX" \
+sudo -u mt5user wget --show-progress -q \
+    -O "$MASTER_EX" \
     "https://github.com/rockitya/mt5-ubuntu-agents.sh/raw/main/metatester64.exe"
 sudo -u mt5user chmod +x "$MASTER_EX"
 
@@ -101,7 +93,8 @@ Windows Registry Editor Version 5.00
 "Login"="$MQL5_LOGIN"
 "SellComputingResources"=dword:00000001
 REG
-        sudo -u mt5user env WINEPREFIX="$AGENT_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" \
+        sudo -u mt5user env WINEPREFIX="$AGENT_WP" WINEARCH=win64 \
+            WINEDLLOVERRIDES="mscoree,mshtml=" \
             xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
 
         CONFIG_DIR="$AGENT_WP/drive_c/users/mt5user/AppData/Roaming/MetaQuotes/Tester"
@@ -116,24 +109,26 @@ SellComputingResources=1
 INI
     fi
 
-    # Launch script using Xvfb + fluxbox for stable OLE/COM binding
     LAUNCH_SCRIPT="/opt/mt5agent-$P/launch.sh"
     cat << EOF | sudo tee "$LAUNCH_SCRIPT" >/dev/null
 #!/bin/bash
 export WINEPREFIX="$AGENT_WP"
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
-fluxbox &
-sleep 2
-exec wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
+# THE FIX: Launch inside Wine's virtual desktop so COM/OLE has a proper shell
+# container to bind to, eliminating hr 0x80004002 permanently
+exec wine explorer /desktop=mt5agent$P,1024x768 "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
 EOF
     sudo chmod +x "$LAUNCH_SCRIPT"
     sudo chown mt5user:mt5user "$LAUNCH_SCRIPT"
 
+    # THE FIX: StartLimitIntervalSec belongs in [Unit] not [Service]
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
 After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -143,8 +138,6 @@ LimitNOFILE=65536
 ExecStart=/usr/bin/xvfb-run --auto-servernum --server-args="-screen 0 1024x768x24" $LAUNCH_SCRIPT
 Restart=on-failure
 RestartSec=15
-StartLimitIntervalSec=120
-StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
@@ -161,7 +154,7 @@ for i in {1..18}; do
     if ss -tuln | grep -q ":3000"; then
         echo ""
         echo "========================================="
-        echo "✓ SUCCESS! Agents are active!"
+        echo "✓ SUCCESS! Agents are RUNNING!"
         ss -tuln | grep -E "30[0-9]{2}" | awk '{print $5}'
         echo "========================================="
         [ ! -z "$MQL5_LOGIN" ] && echo "Cloud Selling: ENABLED for '$MQL5_LOGIN'"
