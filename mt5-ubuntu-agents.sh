@@ -18,12 +18,13 @@ MQL5_LOGIN=$3
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "==> [1/7] NUCLEAR WIPE: Removing Docker & Old Installations..."
-sudo systemctl stop docker 2>/dev/null || true
-sudo apt-get remove --purge -y docker.io docker-ce docker-ce-cli >/dev/null 2>&1 || true
-sudo rm -rf /var/lib/docker /etc/docker >/dev/null 2>&1 || true
+echo "==> [1/7] NUCLEAR WIPE: Killing Locked Processes & Old Installs..."
+# THE FIX: Annihilate any stuck background windows/wine processes locking the system
+sudo killall -9 wine wineserver xvfb-run Xvfb metatester64.exe 2>/dev/null || true
 
+sudo systemctl stop docker 2>/dev/null || true
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
+
 sudo rm -rf /opt/mt5* /tmp/mt5* ~/.wine /root/.wine /etc/systemd/system/mt5-agent* >/dev/null 2>&1 || true
 sudo systemctl daemon-reload
 
@@ -57,20 +58,30 @@ sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
 echo "==> [4/7] Downloading & Installing Official MT5 Suite..."
 MASTER_WP="/opt/mt5master"
-export WINEPREFIX=$MASTER_WP WINEARCH=win64 DISPLAY=:99
-sudo rm -rf $MASTER_WP
+sudo mkdir -p $MASTER_WP
+sudo chown -R $USER:$USER $MASTER_WP
+
+export WINEPREFIX=$MASTER_WP 
+export WINEARCH=win64 
+# THE FIX: Forcefully disable Mono/Gecko prompts so Wine doesn't freeze in the background
+export WINEDLLOVERRIDES="mscoree,mshtml=" 
+
+echo "    -> Initializing Windows Environment (This may take 1-2 minutes)..."
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
-# Using the official installer ensures we get the real EXE, not a broken GitHub LFS file
-wget -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+# THE FIX: Added '--show-progress' so you can see if the MetaQuotes CDN is slow
+echo "    -> Downloading MT5 Installer..."
+wget --show-progress -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+
+echo "    -> Running MT5 Installer (Downloading base files from broker)..."
 xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
 
-echo "    Waiting 60 seconds for background extraction to finish..."
-sleep 60
+echo "    -> Waiting 90 seconds for background extraction..."
+sleep 90
 
 MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
 if [ ! -f "$MASTER_EX" ]; then
-    echo "ERROR: metatester64.exe failed to extract."
+    echo "ERROR: metatester64.exe failed to extract. The MT5 web installer got stuck."
     exit 1
 fi
 
@@ -95,12 +106,12 @@ Windows Registry Editor Version 5.00
 "Login"="$MQL5_LOGIN"
 "SellComputingResources"=dword:00000001
 REG
-        WINEPREFIX="$AGENT_WP" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
+        WINEPREFIX="$AGENT_WP" WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
 
         # Inject INI Configuration
         CONFIG_DIR="$AGENT_WP/drive_c/users/root/AppData/Roaming/MetaQuotes/Tester"
-        mkdir -p "$CONFIG_DIR"
-        cat <<INI > "$CONFIG_DIR/metatester.ini"
+        sudo mkdir -p "$CONFIG_DIR"
+        cat <<INI | sudo tee "$CONFIG_DIR/metatester.ini" >/dev/null
 [Tester]
 Port=$P
 Password=$PW
@@ -110,7 +121,6 @@ SellComputingResources=1
 INI
     fi
 
-    # Create the robust SystemD service that you confirmed worked originally
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -119,6 +129,7 @@ After=network.target
 [Service]
 Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
+Environment=WINEDLLOVERRIDES="mscoree,mshtml="
 LimitNOFILE=65536
 ExecStartPre=-/usr/bin/xvfb-run -a /usr/bin/wine reg delete "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" /f
 ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
@@ -147,4 +158,5 @@ if [ ! -z "$MQL5_LOGIN" ]; then
     echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
 fi
 echo "To check agent 3000 status: sudo systemctl status mt5-agent-3000"
+echo "To check agent logs: sudo journalctl -u mt5-agent-3000 -f"
 echo "========================================="
