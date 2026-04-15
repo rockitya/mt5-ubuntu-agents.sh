@@ -9,18 +9,19 @@
 #   (reconnect anytime: screen -r mt5setup)
 # ─────────────────────────────────────────────────────────
 # Steps:
-#  0. Uninstall old Wine / MetaTester / packages (WARP last)
-#  1. Disable firewall (ufw + iptables)
-#  2. Install Wine + WARP + x11vnc + noVNC + tools
-#  3. Connect WARP (auto-accept TOS)
-#  4. Setup 64GB Swap + ZRAM
-#  5. Download mt5setup.exe (fresh via WARP)
-#  6. Install master MetaTester Wine prefix
-#  7. Clone agent prefixes + generate all helper scripts
-#  8. Start agents (local-only mode)
-#  9. Verify agents
-# 10. Launch noVNC for cloud registration
-# 11. Clean RAM
+#  PRE. Clear apt locks
+#  0.   Uninstall old Wine / MetaTester / packages (WARP last)
+#  1.   Disable firewall (ufw + iptables)
+#  2.   Install Wine + WARP + x11vnc + noVNC + tools
+#  3.   Connect WARP (auto-accept TOS)
+#  4.   Setup 64GB Swap + ZRAM
+#  5.   Download mt5setup.exe (fresh via WARP)
+#  6.   Install master MetaTester Wine prefix
+#  7.   Clone agent prefixes + generate all helper scripts
+#  8.   Start agents (local-only mode)
+#  9.   Verify agents
+# 10.   Launch noVNC for cloud registration
+# 11.   Clean RAM
 # ─────────────────────────────────────────────────────────
 # Usage:
 #   bash mt5-ubuntu-agents.sh [AGENTS] [PASSWORD]
@@ -59,6 +60,33 @@ echo " Cores   : $TOTAL_CORES total / $USABLE_CORES usable"
 echo " Server  : $SERVER_IP"
 echo " noVNC   : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
 echo "============================================="
+
+# ────────────────────────────────────────────────────────────
+# [PRE] CLEAR APT LOCKS
+# ────────────────────────────────────────────────────────────
+echo "==> [PRE] Clearing apt locks..."
+
+pkill -9 -f apt-get 2>/dev/null || true
+pkill -9 -f apt     2>/dev/null || true
+pkill -9 -f dpkg    2>/dev/null || true
+sleep 2
+
+rm -f /var/lib/dpkg/lock-frontend  2>/dev/null || true
+rm -f /var/lib/dpkg/lock           2>/dev/null || true
+rm -f /var/lib/apt/lists/lock      2>/dev/null || true
+rm -f /var/cache/apt/archives/lock 2>/dev/null || true
+
+dpkg --configure -a 2>/dev/null || true
+
+LOCK_WAIT=0
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    echo "    ...Waiting for apt lock ($LOCK_WAIT s)..."
+    sleep 2
+    LOCK_WAIT=$((LOCK_WAIT + 2))
+    [ "$LOCK_WAIT" -ge 60 ] && break
+done
+
+echo "    -> apt lock cleared"
 
 # ────────────────────────────────────────────────────────────
 # [0/11] UNINSTALL OLD MT5 + WINE + PACKAGES
@@ -130,8 +158,8 @@ echo "    -> Cleaning old cron entries..."
 apt-get autoremove -y >/dev/null 2>&1 || true
 apt-get autoclean    -y >/dev/null 2>&1 || true
 
-# WARP removed LAST — after all network-dependent apt operations
-echo "    -> Stopping WARP last (keeps SSH alive during cleanup)..."
+# WARP removed LAST — keeps SSH alive during all cleanup above
+echo "    -> Stopping WARP last (keeps SSH alive)..."
 systemctl stop    warp-svc 2>/dev/null || true
 systemctl disable warp-svc 2>/dev/null || true
 apt-get remove --purge -y cloudflare-warp 2>/dev/null || true
@@ -153,16 +181,16 @@ else
     echo "    -> UFW not installed"
 fi
 
-iptables  -F            2>/dev/null || true
-iptables  -X            2>/dev/null || true
-iptables  -t nat    -F  2>/dev/null || true
-iptables  -t mangle -F  2>/dev/null || true
+iptables  -F                2>/dev/null || true
+iptables  -X                2>/dev/null || true
+iptables  -t nat    -F      2>/dev/null || true
+iptables  -t mangle -F      2>/dev/null || true
 iptables  -P INPUT   ACCEPT 2>/dev/null || true
 iptables  -P FORWARD ACCEPT 2>/dev/null || true
 iptables  -P OUTPUT  ACCEPT 2>/dev/null || true
 
-ip6tables -F            2>/dev/null || true
-ip6tables -X            2>/dev/null || true
+ip6tables -F                2>/dev/null || true
+ip6tables -X                2>/dev/null || true
 ip6tables -P INPUT   ACCEPT 2>/dev/null || true
 ip6tables -P FORWARD ACCEPT 2>/dev/null || true
 ip6tables -P OUTPUT  ACCEPT 2>/dev/null || true
@@ -342,7 +370,6 @@ INSTALL_PID=$!
 
 FOUND=0
 for i in {1..120}; do
-    # WARP health check every 60s
     if [ $(( i % 12 )) -eq 0 ]; then
         if ! warp-cli status 2>/dev/null | grep -qi "Connected"; then
             echo "    WARNING: WARP dropped – reconnecting..."
@@ -505,11 +532,9 @@ websockify -D \\
     >/tmp/websockify.log 2>&1
 sleep 2
 
-MT5_EX="\$(find /opt/mt5master -name metatester64.exe \
-    2>/dev/null | head -1)"
+MT5_EX="\$(find /opt/mt5master -name metatester64.exe 2>/dev/null | head -1)"
 [ -z "\$MT5_EX" ] && \\
-    MT5_EX="\$(find /opt/mt5agent-3000 \
-        -name metatester64.exe 2>/dev/null | head -1)"
+    MT5_EX="\$(find /opt/mt5agent-3000 -name metatester64.exe 2>/dev/null | head -1)"
 
 WINEPREFIX=/opt/mt5master WINEARCH=win64 WINEDEBUG=-all \\
     DISPLAY=:10 wine "\$MT5_EX" >/tmp/mt5-vnc.log 2>&1 &
@@ -601,7 +626,6 @@ yes | warp-cli register >/dev/null 2>&1 || true
 warp-cli connect        >/dev/null 2>&1 || true
 sleep 2
 
-# CPU-affinity + cores trick (hides extra CPUs from Wine)
 taskset -c ${CORE} env DISPLAY=:${DISP} NUMBER_OF_PROCESSORS=1 \
     wine '${AGENT_WIN_EX}' \
     "/address:0.0.0.0:${P}" \
@@ -616,8 +640,8 @@ done
 
 # @reboot cron
 (crontab -l 2>/dev/null | grep -v '@reboot .*start-all' || true; \
- echo "@reboot sleep 45 && warp-cli connect && sleep 5 \
-&& /opt/mt5/start-all.sh") | crontab -
+ echo "@reboot sleep 45 && warp-cli connect && sleep 5 && /opt/mt5/start-all.sh") \
+    | crontab -
 echo "    -> @reboot cron added"
 
 # ────────────────────────────────────────────────────────────
