@@ -17,20 +17,20 @@ MQL5_LOGIN=$3
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "==> [1/6] Cleaning up old installations..."
+echo "==> [1/7] Cleaning up old installations..."
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
 sudo apt-get remove --purge -y wine* xvfb >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
-sudo rm -rf /opt/mt5agent-* /opt/mt5master >/dev/null 2>&1 || true
+sudo rm -rf /opt/mt5agent-* /opt/mt5master /tmp/mt5-docker-build >/dev/null 2>&1 || true
 
-echo "==> [2/6] Installing Docker..."
+echo "==> [2/7] Installing Docker..."
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1
 fi
 sudo systemctl enable docker >/dev/null 2>&1
 sudo systemctl start docker >/dev/null 2>&1
 
-echo "==> [3/6] Creating 64GB Swap File (Max RAM Protection)..."
+echo "==> [3/7] Creating 64GB Swap File (Max RAM Protection)..."
 if swapon --show | grep -q "/swapfile"; then
     echo "    Swap active. Skipping."
 else
@@ -44,7 +44,7 @@ else
     fi
 fi
 
-echo "==> [4/6] Optimizing Host Network..."
+echo "==> [4/7] Optimizing Host Network..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
@@ -56,11 +56,30 @@ vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [5/6] Pulling Pre-Built Docker Image (No building required)..."
-# We bypass the build hang by pulling the pre-made image directly
-sudo docker pull gmag11/metatrader5-docker:latest >/dev/null 2>&1
+echo "==> [5/7] Building Custom MT5 Docker Image..."
+echo "    (You will now see the live build logs so you know it isn't paused!)"
+mkdir -p /tmp/mt5-docker-build
+cd /tmp/mt5-docker-build
 
-echo "==> [6/6] Deploying Cloud Agents..."
+cat << 'EOF' > Dockerfile
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+ENV WINEARCH=win64
+ENV WINEDEBUG=-all
+RUN dpkg --add-architecture i386 && \
+    apt-get update -yqq && \
+    apt-get install -yqq wine64 wine32 xvfb wget winbind net-tools && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /mt5 && \
+    wget -q -nc -O /mt5/metatester64.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/metatester64.exe"
+ENTRYPOINT ["xvfb-run", "-a", "wine", "/mt5/metatester64.exe", "/config:Z:\\mt5\\config.ini"]
+EOF
+
+# THE FIX: '--network=host' forces Docker to use the VPS network adapter, bypassing the MTU packet-drop bug!
+sudo docker build --network=host -t mt5-cloud-agent .
+cd ~
+
+echo "==> [6/7] Deploying Containerized Cloud Agents..."
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
@@ -69,7 +88,6 @@ for P in $(seq $SP $EP); do
     DIR="/opt/mt5-configs/node_$P"
     sudo mkdir -p "$DIR"
     
-    # Generate the absolute source-of-truth config file
     cat <<INI | sudo tee "$DIR/config.ini" >/dev/null
 [Tester]
 Port=$P
@@ -79,21 +97,18 @@ Login=$MQL5_LOGIN
 SellComputingResources=1
 INI
 
-    # Stop any existing container on this port
     sudo docker rm -f mt5-agent-$P >/dev/null 2>&1 || true
     
-    # Launch the agent using the pre-built image
     sudo docker run -d \
         --name mt5-agent-$P \
         --net=host \
         --restart=always \
         --memory="2g" \
-        -v "$DIR/config.ini:/root/.wine/drive_c/users/root/AppData/Roaming/MetaQuotes/Tester/metatester.ini" \
-        gmag11/metatrader5-docker:latest \
-        /bin/bash -c "wine C:\\\\Program\\ Files\\\\MetaTrader\\ 5\\\\metatester64.exe /config:C:\\\\users\\\\root\\\\AppData\\\\Roaming\\\\MetaQuotes\\\\Tester\\\\metatester.ini" >/dev/null 2>&1
+        -v "$DIR/config.ini:/mt5/config.ini" \
+        mt5-cloud-agent >/dev/null 2>&1
 done
 
-echo "==> Finalizing..."
+echo "==> [7/7] Finalizing..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 sleep 6
 
