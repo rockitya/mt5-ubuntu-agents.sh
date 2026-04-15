@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# Accept inline arguments: 1=Cores, 2=Password, 3=MQL5_Login
 TOTAL_CORES=$(nproc)
 if [ -z "$1" ]; then
     REQUESTED_CORES=$((TOTAL_CORES > 1 ? TOTAL_CORES - 1 : 1))
@@ -101,8 +100,7 @@ for P in $(seq $SP $EP); do
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
         
-        # THE FIX: Inject the registry keys into BOTH the Current User and the Wine SYSTEM account (S-1-5-18)
-        # This guarantees the background service will detect the 'Sell' checkbox is ticked.
+        # 1. Inject Registry Keys
         cat <<REG > "$AGENT_WP/cloud.reg"
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
@@ -113,12 +111,35 @@ Windows Registry Editor Version 5.00
 "SellComputingResources"=dword:00000001
 REG
         WINEPREFIX="$AGENT_WP" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
+
+        # THE ULTIMATE FIX: 2. Force-inject the hidden INI files that the modern build requires
+        # MetaTester looks in the hidden AppData folder to confirm cloud settings
+        CONFIG_DIR="$AGENT_WP/drive_c/users/root/AppData/Roaming/MetaQuotes/Tester"
+        mkdir -p "$CONFIG_DIR"
+        
+        cat <<INI > "$CONFIG_DIR/metatester.ini"
+[Tester]
+Port=$P
+Password=$PW
+[Cloud]
+Login=$MQL5_LOGIN
+SellComputingResources=1
+INI
+
+        cat <<INI > "$AGENT_WP/drive_c/Program Files/MetaTrader 5/config/metatester.ini"
+[Tester]
+Port=$P
+Password=$PW
+[Cloud]
+Login=$MQL5_LOGIN
+SellComputingResources=1
+INI
     fi
 
-    # Install the agent (Only pass the account flag during the initial installation setup)
+    # Install the agent
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG >/dev/null 2>&1
     
-    # Run the background service (Do NOT pass the account flag here, it crashes the normal boot sequence)
+    # Run the background service
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
