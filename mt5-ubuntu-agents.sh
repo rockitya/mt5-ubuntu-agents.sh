@@ -7,7 +7,6 @@ if [ -z "$1" ]; then
     REQUESTED_CORES=$((TOTAL_CORES > 1 ? TOTAL_CORES - 1 : 1))
 else
     REQUESTED_CORES=$1
-    # Auto-reserve 1 core for OS network stability if user tries to max it out
     if [ "$REQUESTED_CORES" -ge "$TOTAL_CORES" ] && [ "$TOTAL_CORES" -gt 1 ]; then
         echo "WARNING: Reserving 1 core for OS stability to prevent Cloud disconnects."
         REQUESTED_CORES=$((TOTAL_CORES - 1))
@@ -17,16 +16,31 @@ fi
 PW=${2:-"MetaTester"}
 MQL5_LOGIN=$3
 
-echo "==> [1/8] Preparing Ubuntu & Removing Firewall..."
+echo "==> [1/8] Stopping Auto-Updaters & Fixing DPKG Locks..."
 export DEBIAN_FRONTEND=noninteractive
+
+# Force-stop any background Ubuntu updates that cause the 'lock' error
+sudo systemctl stop apt-daily.timer 2>/dev/null || true
+sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
+sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
+
+# Wait safely if dpkg is still locked by a dying process
+while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    echo "    Waiting for Ubuntu background updates to release the dpkg lock..."
+    sleep 5
+done
+
+# Repair any broken packages from previous interrupted installations
 sudo dpkg --configure -a || true
+
+echo "==> [2/8] Preparing Ubuntu & Removing Firewall..."
 sudo apt-get remove --purge -y needrestart ufw firewalld >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
 
 # Kill old conflicting services
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; done
 
-echo "==> [2/8] Creating 16GB Swap File (OOM Crash Protection)..."
+echo "==> [3/8] Creating 16GB Swap File (OOM Crash Protection)..."
 if [ $(swapon --show | wc -l) -eq 0 ]; then
     sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384 || true
     sudo chmod 600 /swapfile || true
@@ -37,7 +51,7 @@ else
     echo "    Swap file already exists. Skipping."
 fi
 
-echo "==> [3/8] Optimizing TCP Keep-Alive & File Limits..."
+echo "==> [4/8] Optimizing TCP Keep-Alive & File Limits..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
@@ -48,18 +62,18 @@ fs.file-max=1000000
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [4/8] Installing WineHQ & Xvfb..."
+echo "==> [5/8] Installing WineHQ & Xvfb..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
 sudo apt-get install -y wine32 wine64 xvfb wget cabextract winbind net-tools >/dev/null 2>&1
 
-echo "==> [5/8] Initializing Master 64-bit Wine Prefix..."
+echo "==> [6/8] Initializing Master 64-bit Wine Prefix..."
 MASTER_WP="/opt/mt5master"
 export WINEPREFIX=$MASTER_WP WINEARCH=win64 DISPLAY=:99
 sudo rm -rf $MASTER_WP
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
-echo "==> [6/8] Downloading & Extracting MetaTrader 5 silently..."
+echo "==> [7/8] Downloading & Extracting MetaTrader 5 silently..."
 wget -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
 
@@ -72,7 +86,7 @@ if [ ! -f "$MASTER_EX" ]; then
     exit 1
 fi
 
-echo "==> [7/8] Isolating MetaTester Agents for $REQUESTED_CORES stable cores..."
+echo "==> [8/8] Isolating MetaTester Agents for $REQUESTED_CORES stable cores..."
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
@@ -88,7 +102,6 @@ for P in $(seq $SP $EP); do
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
         
-        # Inject Registry key to force "Sell computing resources"
         cat <<REG > "$AGENT_WP/cloud.reg"
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
@@ -98,10 +111,8 @@ REG
         WINEPREFIX="$AGENT_WP" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
     fi
 
-    # Register the agent silently
     WINEPREFIX=$AGENT_WP xvfb-run -a wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG >/dev/null 2>&1
     
-    # Create persistent SystemD service with Anti-Loop Ping Wipe & Socket Limits
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -111,7 +122,6 @@ After=network.target
 Environment=WINEPREFIX=$AGENT_WP
 Environment=WINEARCH=win64
 LimitNOFILE=65536
-# Auto-wipe stale cloud routing pings before every startup to prevent looping
 ExecStartPre=-/usr/bin/xvfb-run -a /usr/bin/wine reg delete "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" /f
 ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
 Restart=always
@@ -126,7 +136,7 @@ EOF
     sudo systemctl restart mt5-agent-$P.service
 done
 
-echo "==> [8/8] Finalizing & One-Time RAM Cleanup..."
+echo "==> Finalizing & One-Time RAM Cleanup..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 sleep 6
 
