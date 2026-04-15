@@ -95,14 +95,14 @@ SellComputingResources=1
 INI
     fi
 
-    # THE FIX: Removed the buggy ExecStartPre escape sequence. 
-    # Perfectly clean SystemD profile tailored exactly for this executable.
+    # THE FIX: Added Type=simple, SendSIGKILL=no, and TimeoutStopSec to prevent SystemD from assassinating Wine
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
 After=network.target
 
 [Service]
+Type=simple
 User=root
 Group=root
 Environment=WINEPREFIX=$AGENT_WP
@@ -112,6 +112,8 @@ LimitNOFILE=65536
 ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
 Restart=always
 RestartSec=10
+SendSIGKILL=no
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
@@ -123,7 +125,6 @@ EOF
 done
 
 echo "==> [7/7] Verifying Agent Status (Waiting up to 60s for Cloud connection)..."
-# THE FIX: Patient 60-second polling loop that watches for the ports to come online
 for i in {1..12}; do
     if ss -tuln | grep -q ":3000"; then
         echo ""
