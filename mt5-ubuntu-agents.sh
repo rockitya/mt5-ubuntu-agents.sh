@@ -1,11 +1,15 @@
 #!/bin/bash
-set -euo pipefail
 
 # ============================================================
 # MT5 COMPLETE SETUP SCRIPT
 # ─────────────────────────────────────────────────────────
+# IMPORTANT: Always run inside screen to survive disconnects:
+#   screen -S mt5setup
+#   bash mt5-ubuntu-agents.sh 7 Prem@1996
+#   (reconnect anytime: screen -r mt5setup)
+# ─────────────────────────────────────────────────────────
 # Steps:
-#  0. Uninstall old Wine / MetaTester / packages
+#  0. Uninstall old Wine / MetaTester / packages (WARP last)
 #  1. Disable firewall (ufw + iptables)
 #  2. Install Wine + WARP + x11vnc + noVNC + tools
 #  3. Connect WARP (auto-accept TOS)
@@ -32,6 +36,7 @@ set -euo pipefail
 #   Reopen VNC     : /opt/mt5/open-for-cloud.sh
 # ============================================================
 
+set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 AGENTS="${1:-7}"
@@ -57,22 +62,21 @@ echo "============================================="
 
 # ────────────────────────────────────────────────────────────
 # [0/11] UNINSTALL OLD MT5 + WINE + PACKAGES
+#        NOTE: WARP is stopped LAST to keep SSH alive
 # ────────────────────────────────────────────────────────────
 echo "==> [0/11] Uninstall old MetaTester + Wine + packages"
 
-echo "    -> Killing old processes..."
+echo "    -> Killing MT5/Wine/screen/VNC processes (NOT WARP yet)..."
 pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f wineserver   2>/dev/null || true
 pkill -9 -f wine         2>/dev/null || true
 pkill -9 -f Xvfb         2>/dev/null || true
 pkill -9 -f x11vnc       2>/dev/null || true
 pkill -9 -f websockify   2>/dev/null || true
-pkill -9 -f warp-cli     2>/dev/null || true
-pkill -9 -f warp-svc     2>/dev/null || true
 screen -ls 2>/dev/null | awk '/\.mt5-/{print $1}' \
     | xargs -r -I{} screen -S {} -X quit 2>/dev/null || true
 screen -wipe 2>/dev/null || true
-sleep 3
+sleep 2
 
 echo "    -> Removing /opt/mt5* directories..."
 rm -rf /opt/mt5master   2>/dev/null || true
@@ -80,9 +84,9 @@ rm -rf /opt/mt5agent-*  2>/dev/null || true
 rm -rf /opt/mt5         2>/dev/null || true
 rm -rf /opt/mt5-docker  2>/dev/null || true
 rm -f  /tmp/mt5setup.exe 2>/dev/null || true
-rm -f  /tmp/.X*-lock    2>/dev/null || true
-rm -rf /tmp/.X11-unix   2>/dev/null || true
-rm -rf /root/.wine      2>/dev/null || true
+rm -f  /tmp/.X*-lock     2>/dev/null || true
+rm -rf /tmp/.X11-unix    2>/dev/null || true
+rm -rf /root/.wine       2>/dev/null || true
 
 echo "    -> Uninstalling Wine packages..."
 apt-get remove --purge -y \
@@ -96,13 +100,6 @@ echo "    -> Uninstalling VNC/noVNC packages..."
 apt-get remove --purge -y \
     x11vnc novnc python3-websockify \
     2>/dev/null || true
-
-echo "    -> Uninstalling Cloudflare WARP (no prompt)..."
-systemctl stop    warp-svc 2>/dev/null || true
-systemctl disable warp-svc 2>/dev/null || true
-apt-get remove --purge -y cloudflare-warp 2>/dev/null || true
-rm -rf /var/lib/cloudflare-warp 2>/dev/null || true
-rm -rf /etc/cloudflare-warp     2>/dev/null || true
 
 echo "    -> Uninstalling ZRAM..."
 systemctl stop    zramswap 2>/dev/null || true
@@ -132,6 +129,16 @@ echo "    -> Cleaning old cron entries..."
 
 apt-get autoremove -y >/dev/null 2>&1 || true
 apt-get autoclean    -y >/dev/null 2>&1 || true
+
+# WARP removed LAST — after all network-dependent apt operations
+echo "    -> Stopping WARP last (keeps SSH alive during cleanup)..."
+systemctl stop    warp-svc 2>/dev/null || true
+systemctl disable warp-svc 2>/dev/null || true
+apt-get remove --purge -y cloudflare-warp 2>/dev/null || true
+rm -rf /var/lib/cloudflare-warp 2>/dev/null || true
+rm -rf /etc/cloudflare-warp     2>/dev/null || true
+sleep 3
+
 echo "    -> Uninstall complete"
 
 # ────────────────────────────────────────────────────────────
@@ -182,7 +189,9 @@ wget -q -NP /etc/apt/sources.list.d/ \
     "https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_VER}/winehq-${UBUNTU_VER}.sources"
 
 curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
-    | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+    | gpg --dearmor \
+    -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+
 echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
 https://pkg.cloudflareclient.com/ ${UBUNTU_VER} main" \
     > /etc/apt/sources.list.d/cloudflare-client.list
@@ -201,7 +210,7 @@ echo "    -> $(wine --version)"
 echo "    -> noVNC: $(dpkg -s novnc 2>/dev/null | grep Version: || echo ok)"
 
 # ────────────────────────────────────────────────────────────
-# [3/11] CONNECT WARP (auto-accept TOS)
+# [3/11] CONNECT WARP (auto-accept TOS via yes |)
 # ────────────────────────────────────────────────────────────
 echo "==> [3/11] Connect Cloudflare WARP (auto TOS)"
 
@@ -209,7 +218,7 @@ systemctl enable  warp-svc >/dev/null 2>&1 || true
 systemctl restart warp-svc >/dev/null 2>&1 || true
 sleep 3
 
-# Use yes | to silently answer TOS prompt
+# yes | silently answers the TOS prompt with y
 yes | warp-cli registration new >/dev/null 2>&1 || true
 yes | warp-cli register         >/dev/null 2>&1 || true
 sleep 2
@@ -218,12 +227,14 @@ warp-cli connect >/dev/null 2>&1 || true
 
 WARP_OK=0
 for i in {1..20}; do
-    warp-cli status 2>/dev/null | grep -qi "Connected" && WARP_OK=1 && break
+    warp-cli status 2>/dev/null | grep -qi "Connected" \
+        && WARP_OK=1 && break
     sleep 2
 done
 
 if [ "$WARP_OK" -eq 1 ]; then
-    EXIT_IP="$(curl -s --max-time 8 https://cloudflare.com/cdn-cgi/trace \
+    EXIT_IP="$(curl -s --max-time 8 \
+        https://cloudflare.com/cdn-cgi/trace \
         2>/dev/null | awk -F= '/^ip=/{print $2}' || echo unknown)"
     echo "    -> WARP connected | Exit IP: $EXIT_IP"
 else
@@ -331,6 +342,7 @@ INSTALL_PID=$!
 
 FOUND=0
 for i in {1..120}; do
+    # WARP health check every 60s
     if [ $(( i % 12 )) -eq 0 ]; then
         if ! warp-cli status 2>/dev/null | grep -qi "Connected"; then
             echo "    WARNING: WARP dropped – reconnecting..."
@@ -340,7 +352,8 @@ for i in {1..120}; do
         fi
     fi
 
-    if find "$WINEPREFIX" -name "metatester64.exe" 2>/dev/null | grep -q .; then
+    if find "$WINEPREFIX" -name "metatester64.exe" \
+            2>/dev/null | grep -q .; then
         FOUND=1
         echo "    -> metatester64.exe found after $((i*5))s – settling 15s..."
         sleep 15
@@ -366,7 +379,8 @@ if [ -z "$MT5_DIR" ] || [ "$FOUND" -ne 1 ]; then
 fi
 echo "    -> Installed at: $MT5_DIR"
 
-wine reg delete "HKCU\\Software\\MetaQuotes Software\\Cloud.Ping" \
+wine reg delete \
+    "HKCU\\Software\\MetaQuotes Software\\Cloud.Ping" \
     /f >/dev/null 2>&1 || true
 
 # ────────────────────────────────────────────────────────────
@@ -460,12 +474,13 @@ pgrep -a websockify 2>/dev/null || echo "  not running"
 EOF
 chmod +x /opt/mt5/status.sh
 
-# ── open-for-cloud.sh (noVNC + MetaTester GUI) ───────────
+# ── SSL cert for noVNC ───────────────────────────────────
 VNC_CERT="/opt/mt5/novnc.pem"
 openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout "$VNC_CERT" -out "$VNC_CERT" -days 3650 \
     -subj "/CN=$SERVER_IP" >/dev/null 2>&1
 
+# ── open-for-cloud.sh (noVNC + MetaTester GUI) ───────────
 cat > /opt/mt5/open-for-cloud.sh <<EOF
 #!/bin/bash
 pkill -9 -f x11vnc    2>/dev/null || true
@@ -490,9 +505,11 @@ websockify -D \\
     >/tmp/websockify.log 2>&1
 sleep 2
 
-MT5_EX="\$(find /opt/mt5master -name metatester64.exe 2>/dev/null | head -1)"
+MT5_EX="\$(find /opt/mt5master -name metatester64.exe \
+    2>/dev/null | head -1)"
 [ -z "\$MT5_EX" ] && \\
-    MT5_EX="\$(find /opt/mt5agent-3000 -name metatester64.exe 2>/dev/null | head -1)"
+    MT5_EX="\$(find /opt/mt5agent-3000 \
+        -name metatester64.exe 2>/dev/null | head -1)"
 
 WINEPREFIX=/opt/mt5master WINEARCH=win64 WINEDEBUG=-all \\
     DISPLAY=:10 wine "\$MT5_EX" >/tmp/mt5-vnc.log 2>&1 &
@@ -505,19 +522,19 @@ echo " Browser  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
 echo " Password : $VNC_PASS"
 echo ""
 echo " IN MetaTester window:"
-echo "   → Tab: MQL5 Cloud Network"
-echo "   → Tick: Allow public use of agents"
-echo "   → Login: your MQL5 username"
-echo "   → Password: your MQL5 account password"
-echo "   → Click: Apply"
+echo "   -> Tab: MQL5 Cloud Network"
+echo "   -> Tick: Allow public use of agents"
+echo "   -> Login: your MQL5 username"
+echo "   -> Password: your MQL5 account password"
+echo "   -> Click: Apply"
 echo ""
-echo " After Apply:"
+echo " After clicking Apply run:"
 echo "   /opt/mt5/cloud-on.sh YOUR_MQL5_LOGIN"
 echo "============================================"
 EOF
 chmod +x /opt/mt5/open-for-cloud.sh
 
-# ── start-novnc.sh (standalone, no MetaTester) ───────────
+# ── start-novnc.sh (VNC only, no MetaTester) ─────────────
 cat > /opt/mt5/start-novnc.sh <<EOF
 #!/bin/bash
 pkill -9 -f x11vnc    2>/dev/null || true
@@ -549,7 +566,8 @@ for P in $(seq "$SP" "$EP"); do
     echo "    -> Cloning prefix for agent $P (core $CORE, display :$DISP)..."
     rsync -a --exclude='*.lock' "$WINEPREFIX/" "$AGENT_WP/" >/dev/null
 
-    AGENT_EX="$(find "$AGENT_WP" -name metatester64.exe 2>/dev/null | head -1)"
+    AGENT_EX="$(find "$AGENT_WP" -name metatester64.exe \
+        2>/dev/null | head -1)"
     if [ -z "$AGENT_EX" ]; then
         echo "ERROR: metatester64.exe missing in $AGENT_WP"
         exit 1
@@ -598,8 +616,8 @@ done
 
 # @reboot cron
 (crontab -l 2>/dev/null | grep -v '@reboot .*start-all' || true; \
- echo "@reboot sleep 45 && warp-cli connect && sleep 5 && /opt/mt5/start-all.sh") \
-    | crontab -
+ echo "@reboot sleep 45 && warp-cli connect && sleep 5 \
+&& /opt/mt5/start-all.sh") | crontab -
 echo "    -> @reboot cron added"
 
 # ────────────────────────────────────────────────────────────
@@ -617,7 +635,8 @@ ONLINE=0
 for i in {1..60}; do
     COUNT=0
     for P in $(seq "$SP" "$EP"); do
-        ss -tuln 2>/dev/null | grep -q ":$P " && COUNT=$((COUNT+1)) || true
+        ss -tuln 2>/dev/null | grep -q ":$P " \
+            && COUNT=$((COUNT+1)) || true
     done
     if [ "$COUNT" -ge 1 ]; then
         ONLINE="$COUNT"
@@ -656,9 +675,7 @@ chmod +x /usr/local/bin/clear-ram-cache.sh
 
 echo "    -> Memory before clean:"
 free -h | grep -E "Mem|Swap"
-
 /usr/local/bin/clear-ram-cache.sh
-
 echo "    -> Memory after clean:"
 free -h | grep -E "Mem|Swap"
 
@@ -673,21 +690,21 @@ cat <<DONE
  Agents   : $ONLINE / $AGENTS running (local-only)
  Swap     : ${SWAP_GB}GB on /swapfile
  ZRAM     : 50% compressed RAM (lz4)
- WARP     : auto TOS accepted + connected
+ WARP     : auto TOS + connected
  Firewall : disabled (ufw + iptables flushed)
  CPU trick: taskset + NUMBER_OF_PROCESSORS=1
 
  ─────────────────────────────────────────────────
- STEP 1 — Register cloud (ONE TIME):
+ STEP 1 — Register cloud (ONE TIME via browser):
    https://$SERVER_IP:$NOVNC_PORT/vnc.html
    VNC Password: $VNC_PASS
 
    In MetaTester window:
-   → Tab: MQL5 Cloud Network
-   → Tick: Allow public use of agents
-   → Login: your MQL5 username
-   → Password: your MQL5 account password
-   → Click: Apply
+   -> Tab: MQL5 Cloud Network
+   -> Tick: Allow public use of agents
+   -> Login: your MQL5 username
+   -> Password: your MQL5 account password
+   -> Click: Apply
 
  STEP 2 — After clicking Apply:
    /opt/mt5/cloud-on.sh rcktya
