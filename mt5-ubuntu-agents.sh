@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+# Accept inline arguments: 1=Cores, 2=Password, 3=MQL5_Login
 TOTAL_CORES=$(nproc)
 if [ -z "$1" ]; then
     REQUESTED_CORES=$((TOTAL_CORES > 1 ? TOTAL_CORES - 1 : 1))
@@ -15,26 +16,24 @@ fi
 PW=${2:-"MetaTester"}
 MQL5_LOGIN=$3
 
-echo "==> [1/8] Stopping Auto-Updaters & Fixing DPKG Locks..."
 export DEBIAN_FRONTEND=noninteractive
 
-sudo systemctl stop apt-daily.timer 2>/dev/null || true
-sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
-sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
-
-while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
-    echo "    Waiting for Ubuntu background updates to release the dpkg lock..."
-    sleep 5
-done
-sudo dpkg --configure -a || true
-
-echo "==> [2/8] Preparing Ubuntu & Removing Firewall..."
-sudo apt-get remove --purge -y needrestart ufw firewalld >/dev/null 2>&1 || true
+echo "==> [1/7] Cleaning up old Wine & SystemD installations..."
+# Stop old local services
+for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
+# Remove problematic Wine installs from host
+sudo apt-get remove --purge -y wine* xvfb >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
+sudo rm -rf /opt/mt5agent-* /opt/mt5master >/dev/null 2>&1 || true
 
-for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; done
+echo "==> [2/7] Installing Docker..."
+if ! command -v docker &> /dev/null; then
+    curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1
+fi
+sudo systemctl enable docker >/dev/null 2>&1
+sudo systemctl start docker >/dev/null 2>&1
 
-echo "==> [3/8] Creating 64GB Swap File (Max RAM Protection)..."
+echo "==> [3/7] Creating 64GB Swap File (Max RAM Protection)..."
 if swapon --show | grep -q "/swapfile"; then
     echo "    Swap active. Skipping."
 else
@@ -48,7 +47,7 @@ else
     fi
 fi
 
-echo "==> [4/8] Optimizing TCP Keep-Alive & File Limits..."
+echo "==> [4/7] Optimizing TCP Keep-Alive & File Limits..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
@@ -60,91 +59,72 @@ vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [5/8] Installing WineHQ & Xvfb..."
-sudo dpkg --add-architecture i386
-sudo apt-get update -y >/dev/null
-sudo apt-get install -y wine32 wine64 xvfb wget cabextract winbind net-tools >/dev/null 2>&1
+echo "==> [5/7] Building Custom MT5 Docker Image (Takes 1-2 minutes)..."
+# We build a lightweight, self-contained image on the fly to guarantee compatibility
+mkdir -p /opt/mt5-docker
+cat << 'EOF' > /opt/mt5-docker/Dockerfile
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+ENV WINEARCH=win64
+ENV WINEDEBUG=-all
+RUN dpkg --add-architecture i386 && \
+    apt-get update -yqq && \
+    apt-get install -yqq wine64 wine32 xvfb wget winbind net-tools && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /mt5 && \
+    wget -q -nc -O /mt5/metatester64.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/metatester64.exe"
+# Start the agent natively using the config file mapped to the Z: drive
+ENTRYPOINT ["xvfb-run", "-a", "wine", "/mt5/metatester64.exe", "/config:Z:\\mt5\\config.ini"]
+EOF
 
-echo "==> [6/8] Initializing Master 64-bit Wine Prefix..."
-MASTER_WP="/opt/mt5master"
-export WINEPREFIX=$MASTER_WP WINEARCH=win64 DISPLAY=:99
-sudo rm -rf $MASTER_WP
-xvfb-run -a wineboot -u >/dev/null 2>&1
+sudo docker build -t mt5-cloud-agent /opt/mt5-docker >/dev/null 2>&1
 
-echo "==> [7/8] Downloading & Extracting MetaTrader 5 silently..."
-wget -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
-xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
-
-echo "    Waiting 60 seconds for background extraction to finish..."
-sleep 60
-
-MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
-if [ ! -f "$MASTER_EX" ]; then
-    echo "ERROR: metatester64.exe failed to extract."
-    exit 1
-fi
-
-echo "==> [8/8] Isolating MetaTester Agents for $REQUESTED_CORES stable cores..."
+echo "==> [6/7] Deploying Containerized Cloud Agents..."
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
 for P in $(seq $SP $EP); do
-    echo "    -> Deploying Agent on port $P..."
-    AGENT_WP="/opt/mt5agent-$P"
+    echo "    -> Spinning up Agent Container on port $P..."
+    DIR="/opt/mt5-configs/node_$P"
+    sudo mkdir -p "$DIR"
     
-    sudo rm -rf "$AGENT_WP"
-    sudo cp -r "$MASTER_WP" "$AGENT_WP"
-    AGENT_EX="$AGENT_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
+    # Generate the absolute source-of-truth config file
+    cat <<INI | sudo tee "$DIR/config.ini" >/dev/null
+[Tester]
+Port=$P
+Password=$PW
+[Cloud]
+Login=$MQL5_LOGIN
+SellComputingResources=1
+INI
 
-    ACCOUNT_FLAG=""
-    if [ ! -z "$MQL5_LOGIN" ]; then
-        ACCOUNT_FLAG="/account:$MQL5_LOGIN"
-        
-        cat <<REG > "$AGENT_WP/cloud.reg"
-Windows Registry Editor Version 5.00
-[HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
-"Login"="$MQL5_LOGIN"
-"SellComputingResources"=dword:00000001
-[HKEY_USERS\S-1-5-18\Software\MetaQuotes\MetaTester]
-"Login"="$MQL5_LOGIN"
-"SellComputingResources"=dword:00000001
-REG
-        WINEPREFIX="$AGENT_WP" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
-    fi
+    # Stop any existing container on this port
+    sudo docker rm -f mt5-agent-$P >/dev/null 2>&1 || true
     
-    # THE FIX: Added /install to the ExecStart line to prevent the agent from instantly shutting down with code 0!
-    cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
-[Unit]
-Description=MT5 Strategy Tester Agent on Port $P
-After=network.target
-
-[Service]
-Environment=WINEPREFIX=$AGENT_WP
-Environment=WINEARCH=win64
-LimitNOFILE=65536
-ExecStartPre=-/usr/bin/xvfb-run -a /usr/bin/wine reg delete "HKEY_USERS\\S-1-5-18\\Software\\MetaQuotes Software\\Cloud.Ping" /f
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /install /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    sudo systemctl daemon-reload
-    sudo systemctl enable mt5-agent-$P.service >/dev/null 2>&1
-    sudo systemctl restart mt5-agent-$P.service
+    # Launch the agent in the background, mapping the config file directly into it
+    sudo docker run -d \
+        --name mt5-agent-$P \
+        --net=host \
+        --restart=always \
+        --memory="2g" \
+        -v "$DIR/config.ini:/mt5/config.ini" \
+        mt5-cloud-agent >/dev/null 2>&1
 done
 
-echo "==> Finalizing & One-Time RAM Cleanup..."
+echo "==> [7/7] Finalizing..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 sleep 6
 
 echo ""
 echo "========================================="
-echo "✓ SUCCESS! Stable Agents active on ports:"
-ss -tuln | grep -E "30[0-9]{2}|3100" | awk '{print $5}'
+echo "✓ SUCCESS! Dockerized Agents are active!"
+sudo docker ps --format "table {{.Names}}\t{{.Status}}"
 echo "========================================="
+echo "VPS IP  : $(hostname -I | awk '{print $1}')"
+echo "Password: $PW"
 if [ ! -z "$MQL5_LOGIN" ]; then
     echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
 fi
+echo "========================================="
+echo "To view live cloud connection logs for Port 3000, run:"
+echo "sudo docker logs -f mt5-agent-3000"
