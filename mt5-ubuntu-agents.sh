@@ -18,16 +18,13 @@ MQL5_LOGIN=$3
 export DEBIAN_FRONTEND=noninteractive
 
 echo "==> [1/8] Disabling Firewall & Stopping Auto-Updates..."
-# Disable Ubuntu Firewall
 sudo ufw disable >/dev/null 2>&1 || true
 sudo iptables -F >/dev/null 2>&1 || true
 
-# Stop background updaters that cause silent freezes
 sudo systemctl stop apt-daily.timer 2>/dev/null || true
 sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
 sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
 
-# Wait safely if dpkg is locked by the system
 while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
     echo "    Waiting for Ubuntu background updates to release the dpkg lock..."
     sleep 5
@@ -40,9 +37,8 @@ sudo apt-get remove --purge -y wine* xvfb >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
 sudo rm -rf /opt/mt5agent-* /opt/mt5master /tmp/mt5-docker-build >/dev/null 2>&1 || true
 
-echo "==> [3/8] Installing Docker (Logs enabled so you can see progress)..."
+echo "==> [3/8] Installing Docker..."
 if ! command -v docker &> /dev/null; then
-    # Removed the silent flag so you can actually watch Docker install
     curl -fsSL https://get.docker.com | sudo sh
 else
     echo "    Docker is already installed."
@@ -76,9 +72,13 @@ vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [6/8] Building Custom MT5 Docker Image..."
+echo "==> [6/8] Downloading Custom Agent & Building Docker Image..."
 mkdir -p /tmp/mt5-docker-build
 cd /tmp/mt5-docker-build
+
+# THE FIX: Download the EXE directly from your rockitya GitHub repo
+echo "    Downloading custom metatester64.exe from GitHub..."
+wget -q -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
 cat << 'EOF' > Dockerfile
 FROM ubuntu:22.04
@@ -87,14 +87,15 @@ ENV WINEARCH=win64
 ENV WINEDEBUG=-all
 RUN dpkg --add-architecture i386 && \
     apt-get update -yqq && \
-    apt-get install -yqq wine64 wine32 xvfb wget winbind net-tools && \
+    apt-get install -yqq wine64 wine32 xvfb winbind net-tools && \
     rm -rf /var/lib/apt/lists/*
-RUN mkdir -p /mt5 && \
-    wget -q -nc -O /mt5/metatester64.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/metatester64.exe"
+RUN mkdir -p /mt5
+COPY metatester64.exe /mt5/metatester64.exe
 ENTRYPOINT ["xvfb-run", "-a", "wine", "/mt5/metatester64.exe", "/config:Z:\\mt5\\config.ini"]
 EOF
 
-sudo docker build --network=host -t mt5-cloud-agent .
+echo "    Building the Docker image..."
+sudo docker build -t mt5-cloud-agent .
 cd ~
 
 echo "==> [7/8] Deploying Containerized Cloud Agents..."
@@ -106,7 +107,6 @@ for P in $(seq $SP $EP); do
     DIR="/opt/mt5-configs/node_$P"
     sudo mkdir -p "$DIR"
     
-    # 100% accurate cloud instruction mapping
     cat <<INI | sudo tee "$DIR/config.ini" >/dev/null
 [Tester]
 Port=$P
@@ -118,7 +118,6 @@ INI
 
     sudo docker rm -f mt5-agent-$P >/dev/null 2>&1 || true
     
-    # Launch Docker mapped directly to the Host network
     sudo docker run -d \
         --name mt5-agent-$P \
         --net=host \
