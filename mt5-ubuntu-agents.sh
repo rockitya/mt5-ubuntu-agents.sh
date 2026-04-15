@@ -216,17 +216,39 @@ mkdir -p $WINEPREFIX
 xvfb-run -a wineboot -u >/dev/null 2>&1
 echo "    -> Wine prefix initialized."
 
-echo "    -> Running silent MT5 install (WARP active — wait up to 5 minutes)..."
+# Verify WARP is still connected before starting install
+echo "    -> Verifying WARP before install..."
+warp-cli connect >/dev/null 2>&1 || true
+sleep 3
+WARP_OK=$(warp-cli status 2>/dev/null | grep -i "Connected" || echo "")
+if [ -z "$WARP_OK" ]; then
+    echo "    WARNING: WARP not confirmed. Attempting reconnect..."
+    warp-cli disconnect >/dev/null 2>&1 || true
+    sleep 3
+    warp-cli connect >/dev/null 2>&1 || true
+    sleep 8
+fi
+echo "    -> Exit IP: $(curl -s --max-time 8 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep '^ip=' | cut -d= -f2 || echo 'check manually')"
+
+echo "    -> Running silent MT5 install (WARP active — wait up to 10 minutes)..."
 xvfb-run -a wine /tmp/mt5setup.exe /auto &
 INSTALL_PID=$!
 
-for i in {1..60}; do
+for i in {1..120}; do
     if find $WINEPREFIX -name "metatester64.exe" 2>/dev/null | grep -q .; then
         echo "    -> metatester64.exe found after $((i*5))s. Waiting 15s for installer to finish..."
         sleep 15
         break
     fi
-    echo "    ...Installing ($((i*5))s / 300s)..."
+    # Re-check WARP every 60s — reconnect if dropped
+    if [ $((i % 12)) -eq 0 ]; then
+        if ! warp-cli status 2>/dev/null | grep -qi "Connected"; then
+            echo "    WARNING: WARP dropped! Reconnecting..."
+            warp-cli connect >/dev/null 2>&1 || true
+            sleep 5
+        fi
+    fi
+    echo "    ...Installing ($((i*5))s / 600s)..."
     sleep 5
 done
 
@@ -239,7 +261,7 @@ MT5_DIR=$(find $WINEPREFIX -name "metatester64.exe" -exec dirname {} \; 2>/dev/n
 if [ -z "$MT5_DIR" ]; then
     echo "ERROR: MT5 installation failed. metatester64.exe not found."
     echo "  Check WARP: warp-cli status"
-    echo "  Retry:      bash $0 $*"
+    echo "  Retry:      bash $0 $REQUESTED_CORES \"$PW\" $MQL5_LOGIN"
     exit 1
 fi
 echo "    -> Installed at: $MT5_DIR"
