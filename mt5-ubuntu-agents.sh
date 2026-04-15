@@ -76,24 +76,24 @@ sed -i 's/^#proxy_dns/proxy_dns/'           /etc/proxychains4.conf
 sed -i '/^socks/d'                           /etc/proxychains4.conf
 echo "socks5 127.0.0.1 9050"               >> /etc/proxychains4.conf
 
-# Start Tor and wait for a working circuit (up to 60s)
+# Start Tor service
 systemctl start tor
 systemctl enable tor >/dev/null 2>&1
-echo "    -> Waiting for Tor circuit (up to 60s)..."
-TOR_READY=0
+
+# Wait for Tor SOCKS port to be listening (local check — no external connection needed)
+echo "    -> Waiting for Tor SOCKS port 9050..."
 for i in {1..30}; do
-    if proxychains4 -q curl -s --max-time 5 \
-        https://check.torproject.org/api/ip 2>/dev/null | grep -q '"IsTor":true'; then
-        echo "    -> Tor circuit ready after $((i*2))s."
-        TOR_READY=1
+    if ss -tuln 2>/dev/null | grep -q ':9050 '; then
+        echo "    -> Tor SOCKS port ready after $((i*2))s."
         break
     fi
+    printf "."
     sleep 2
 done
-if [ "$TOR_READY" -eq 0 ]; then
-    echo "    WARNING: Tor circuit not confirmed — will try anyway."
-fi
 
+# Extra 5s buffer for Tor to build its first circuit after port opens
+sleep 5
+echo "    -> Tor ready."
 echo "    -> $(wine --version)"
 
 # --- [3/8] SWAP ---
@@ -143,7 +143,7 @@ echo "    -> RAM cache cleared now. Auto-clear every 30 min via cron."
 
 # --- [5/8] MT5 SETUP DOWNLOAD (ONCE ONLY, REUSE ON RERUNS) ---
 # IMPORTANT: mt5setup.exe is a WEB INSTALLER (~300KB). It downloads MT5
-# components from MetaQuotes CDN at install time too — so Tor covers both.
+# components from MetaQuotes CDN at install time too — Tor covers both.
 echo "==> [5/8] Checking for mt5setup.exe..."
 
 SETUP_FILE="/opt/mt5setup.exe"
@@ -155,6 +155,7 @@ if [ "$FILESIZE" -gt 1000000 ]; then
     echo "    -> Reusing cached mt5setup.exe ($(du -sh $SETUP_FILE | cut -f1)). Skipping download."
 else
     echo "    -> Downloading via Tor (bypasses MetaQuotes CDN IP block)..."
+    echo "    -> (Tor is slower ~100-300KB/s — expect 30-60s for the installer)"
     proxychains4 -q wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
         proxychains4 -q curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
 
@@ -162,15 +163,15 @@ else
 
     if [ "$FILESIZE" -lt 1000000 ]; then
         echo ""
-        echo "ERROR: All download methods failed (${FILESIZE} bytes)."
+        echo "ERROR: Tor download failed (${FILESIZE} bytes)."
         echo ""
-        echo "  Option A — Manual SCP from your LOCAL PC:"
+        echo "  Option A — Retry with a fresh Tor circuit:"
+        echo "  systemctl restart tor && sleep 15 && bash $0 $*"
+        echo ""
+        echo "  Option B — Manual SCP from your LOCAL PC:"
         echo "  curl -o mt5setup.exe '${MT5_CDN}'"
         echo "  scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):${SETUP_FILE}"
-        echo ""
-        echo "  Option B — Retry Tor (may need a new circuit):"
-        echo "  systemctl restart tor && sleep 10"
-        echo "  bash $0 $*"
+        echo "  Then re-run — download will be skipped automatically."
         rm -f "$SETUP_FILE"
         exit 1
     fi
@@ -192,6 +193,7 @@ echo "    -> Wine prefix initialized."
 
 # mt5setup.exe pulls MT5 components from CDN at install time — must also go via Tor
 echo "    -> Running silent MT5 install via Tor (wait up to 5 minutes)..."
+echo "    -> (Install downloads ~22MB through Tor — may take 3-5 minutes)"
 proxychains4 -q xvfb-run -a wine /tmp/mt5setup.exe /auto &
 INSTALL_PID=$!
 
@@ -214,10 +216,8 @@ sleep 3
 MT5_DIR=$(find $WINEPREFIX -name "metatester64.exe" -exec dirname {} \; 2>/dev/null | head -1)
 if [ -z "$MT5_DIR" ]; then
     echo "ERROR: MT5 installation failed. metatester64.exe not found."
-    echo "  Possible cause: Tor circuit dropped during install."
-    echo "  Try: systemctl restart tor && sleep 10 && bash $0 $*"
-    echo "  Or delete cached installer to force fresh download:"
-    echo "  rm $SETUP_FILE && bash $0 $*"
+    echo "  Tor circuit may have dropped during install. Retry:"
+    echo "  systemctl restart tor && sleep 15 && bash $0 $*"
     exit 1
 fi
 echo "    -> Installed at: $MT5_DIR"
