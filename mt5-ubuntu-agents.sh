@@ -19,37 +19,47 @@ MQL5_LOGIN=$3
 echo "==> [1/8] Stopping Auto-Updaters & Fixing DPKG Locks..."
 export DEBIAN_FRONTEND=noninteractive
 
-# Force-stop any background Ubuntu updates that cause the 'lock' error
 sudo systemctl stop apt-daily.timer 2>/dev/null || true
 sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
 sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
 
-# Wait safely if dpkg is still locked by a dying process
 while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
     echo "    Waiting for Ubuntu background updates to release the dpkg lock..."
     sleep 5
 done
-
-# Repair any broken packages from previous interrupted installations
 sudo dpkg --configure -a || true
 
 echo "==> [2/8] Preparing Ubuntu & Removing Firewall..."
 sudo apt-get remove --purge -y needrestart ufw firewalld >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
 
-# Kill old conflicting services
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; done
 
-echo "==> [3/8] Creating 16GB Swap File (OOM Crash Protection)..."
-if [ $(swapon --show | wc -l) -eq 0 ]; then
-    sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384 || true
-    sudo chmod 600 /swapfile || true
-    sudo mkswap /swapfile || true
-    sudo swapon /swapfile || true
-    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null || true
-else
-    echo "    Swap file already exists. Skipping."
+# -------------------------------------------------------------
+# MASSIVE 64GB SWAP FILE CREATION
+# -------------------------------------------------------------
+echo "==> [3/8] Creating 64GB Swap File (Max RAM Protection)..."
+# Check if a smaller swapfile already exists and turn it off
+if swapon --show | grep -q "/swapfile"; then
+    echo "    Disabling old swap..."
+    sudo swapoff /swapfile || true
+    sudo rm -f /swapfile || true
 fi
+
+echo "    Allocating 64GB of disk space (This might take a few minutes depending on SSD speed)..."
+# Using 'fallocate' is fastest. If it fails, fallback to 'dd' to write zeros.
+sudo fallocate -l 64G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress || true
+
+sudo chmod 600 /swapfile || true
+sudo mkswap /swapfile || true
+sudo swapon /swapfile || true
+
+# Add to fstab if not already there so it survives reboots
+if ! grep -q "/swapfile none swap" /etc/fstab; then
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null || true
+fi
+echo "    64GB Swap active!"
+# -------------------------------------------------------------
 
 echo "==> [4/8] Optimizing TCP Keep-Alive & File Limits..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
@@ -59,6 +69,8 @@ net.ipv4.tcp_keepalive_probes=6
 net.ipv4.tcp_fin_timeout=30
 net.core.somaxconn=1024
 fs.file-max=1000000
+# Tell Linux to aggressively use the 64GB swap file when RAM fills up
+vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
@@ -145,8 +157,6 @@ echo "========================================="
 echo "✓ SUCCESS! Stable Agents active on ports:"
 ss -tuln | grep -E "30[0-9]{2}|3100" | awk '{print $5}'
 echo "========================================="
-echo "VPS IP  : $(hostname -I | awk '{print $1}')"
-echo "Password: $PW"
-if [ ! -z "$MQL5_LOGIN" ]; then
-    echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
-fi
+echo "Total System Memory + Swap:"
+free -h | grep -E "Mem|Swap"
+echo "========================================="
