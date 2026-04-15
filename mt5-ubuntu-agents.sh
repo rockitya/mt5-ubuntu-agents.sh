@@ -6,13 +6,10 @@ set -e
 # Example: bash mt5-ubuntu-agents.sh 7 Prem@1996 rcktya
 #
 # CDN blocked? No problem — Cloudflare WARP is used automatically.
-# WARP changes the server exit IP via Cloudflare, bypassing MetaQuotes block.
-#
 # Already have mt5setup.exe? SCP it once and it's reused forever:
 #   scp mt5setup.exe root@SERVER:/opt/mt5setup.exe
 #
-# Password tip (keeps it out of ps/history):
-#   echo 'YourPassword' > /root/.mt5pw && chmod 600 /root/.mt5pw
+# Password tip: echo 'YourPassword' > /root/.mt5pw && chmod 600 /root/.mt5pw
 
 TOTAL_CORES=$(nproc)
 if [ -z "$1" ]; then
@@ -25,7 +22,6 @@ else
     fi
 fi
 
-# Password: prefer /root/.mt5pw file over CLI arg (avoids ps/history exposure)
 if [ -f /root/.mt5pw ]; then
     PW=$(cat /root/.mt5pw)
 elif [ ! -z "$2" ]; then
@@ -83,16 +79,14 @@ apt-get install -y --install-recommends \
 
 echo "    -> $(wine --version)"
 
-# Connect Cloudflare WARP — changes server exit IP to Cloudflare, bypasses MetaQuotes CDN block
+# Connect Cloudflare WARP — changes server exit IP, bypasses MetaQuotes CDN block
 echo "    -> Connecting Cloudflare WARP..."
 warp-cli --accept-tos register >/dev/null 2>&1 || true
 warp-cli connect >/dev/null 2>&1 || true
 
-# Wait for WARP to establish connection (up to 30s)
 WARP_READY=0
 for i in {1..15}; do
-    STATUS=$(warp-cli status 2>/dev/null | grep -i "Status" | head -1 || echo "")
-    if echo "$STATUS" | grep -qi "Connected"; then
+    if warp-cli status 2>/dev/null | grep -qi "Connected"; then
         echo "    -> WARP connected after $((i*2))s."
         WARP_READY=1
         break
@@ -102,33 +96,58 @@ for i in {1..15}; do
 done
 echo ""
 
-if [ "$WARP_READY" -eq 0 ]; then
-    echo "    WARNING: WARP not confirmed connected. Checking exit IP..."
-fi
-
-# Show current exit IP (should be Cloudflare, not Tencent)
 EXIT_IP=$(curl -s --max-time 10 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || echo "unknown")
-echo "    -> Current exit IP: $EXIT_IP (via Cloudflare WARP)"
+echo "    -> Exit IP via WARP: $EXIT_IP"
 
-# --- [3/8] SWAP ---
-echo "==> [3/8] Setting up Swap (persistent across reboots)..."
+# --- [3/8] SWAP 64GB PERSISTENT ---
+echo "==> [3/8] Setting up 64GB Swap (persistent across reboots)..."
 
-AVAIL_GB=$(df -BG / | awk 'NR==2{print $4}' | tr -d 'G')
-if [ "$AVAIL_GB" -lt 66 ]; then
-    echo "    WARNING: Only ${AVAIL_GB}GB free. Allocating ${AVAIL_GB}GB swap instead of 64GB."
-    SWAP_SIZE="${AVAIL_GB}G"
-    SWAP_MB=$((AVAIL_GB * 1024 - 2048))
-else
-    SWAP_SIZE="64G"
-    SWAP_MB=65536
-fi
-
+# Disable and remove any existing swap first
 swapoff -a 2>/dev/null || true
 rm -f /swapfile 2>/dev/null || true
-fallocate -l $SWAP_SIZE /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=$SWAP_MB status=progress || true
-chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
+# Check available disk space
+AVAIL_GB=$(df -BG / | awk 'NR==2{print $4}' | tr -d 'G')
+echo "    -> Available disk: ${AVAIL_GB}GB"
+
+if [ "$AVAIL_GB" -lt 66 ]; then
+    SWAP_GB=$((AVAIL_GB - 2))
+    echo "    WARNING: Only ${AVAIL_GB}GB free. Using ${SWAP_GB}GB swap instead of 64GB."
+else
+    SWAP_GB=64
+fi
+
+SWAP_MB=$((SWAP_GB * 1024))
+echo "    -> Allocating ${SWAP_GB}GB (${SWAP_MB}MB) swap..."
+
+# Try fallocate first (instant), fall back to dd (slower but works on all filesystems)
+if fallocate -l ${SWAP_GB}G /swapfile 2>/dev/null; then
+    echo "    -> fallocate succeeded."
+else
+    echo "    -> fallocate failed (filesystem may not support it). Using dd..."
+    dd if=/dev/zero of=/swapfile bs=1M count=$SWAP_MB status=progress
+fi
+
+# Verify file was actually created and has correct size
+ACTUAL_SIZE=$(stat -c%s /swapfile 2>/dev/null || echo 0)
+EXPECTED_SIZE=$((SWAP_MB * 1024 * 1024))
+if [ "$ACTUAL_SIZE" -lt "$EXPECTED_SIZE" ]; then
+    echo "    ERROR: Swap file is only $(du -sh /swapfile | cut -f1) — expected ${SWAP_GB}GB."
+    echo "    Check disk space: df -h /"
+    # Continue without swap rather than exit — agents can still run
+else
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+
+    # Persist in fstab
+    grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+    echo "    -> Swap successfully created and activated:"
+    free -h | grep Swap
+fi
+
+# Kernel tuning
 cat > /etc/sysctl.d/99-mt5.conf << 'EOF'
 vm.swappiness=10
 net.ipv4.tcp_keepalive_time=60
@@ -139,11 +158,10 @@ net.core.somaxconn=1024
 fs.file-max=1000000
 EOF
 sysctl -p /etc/sysctl.d/99-mt5.conf >/dev/null 2>&1 || true
-echo "    -> Swap active (${SWAP_SIZE}) and persisted in /etc/fstab"
-free -h | grep Swap
+echo "    -> Kernel tuning applied."
 
-# --- [4/8] RAM CACHE CRON ---
-echo "==> [4/8] Scheduling RAM cache auto-clear every 30 minutes..."
+# --- [4/8] RAM CACHE SCRIPT (runs at end, not here) ---
+echo "==> [4/8] Creating RAM cache script (will run after agents launch)..."
 cat > /usr/local/bin/clear-ram-cache.sh << 'EOF'
 #!/bin/bash
 sync
@@ -151,14 +169,14 @@ sync
 echo 1 > /proc/sys/vm/drop_caches
 EOF
 chmod +x /usr/local/bin/clear-ram-cache.sh
-/usr/local/bin/clear-ram-cache.sh
+
+# Schedule cron — but DO NOT run now (agents not up yet)
 (crontab -l 2>/dev/null | grep -v clear-ram-cache; echo "*/30 * * * * /usr/local/bin/clear-ram-cache.sh") | crontab -
-echo "    -> RAM cache cleared now. Auto-clear every 30 min via cron."
+echo "    -> RAM cache script created. Will run AFTER agents are up. Cron: every 30 min."
 
 # --- [5/8] MT5 SETUP DOWNLOAD (ONCE ONLY, REUSE ON RERUNS) ---
-# IMPORTANT: mt5setup.exe is a WEB INSTALLER (~300KB). It downloads MT5
-# components from MetaQuotes CDN at install time too.
-# WARP changes the system exit IP so both download and install go through Cloudflare.
+# mt5setup.exe is a WEB INSTALLER — it also pulls MT5 from CDN at install time.
+# WARP covers both automatically (system-level IP change, no proxy wrapper needed).
 echo "==> [5/8] Checking for mt5setup.exe..."
 
 SETUP_FILE="/opt/mt5setup.exe"
@@ -169,7 +187,7 @@ FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 if [ "$FILESIZE" -gt 1000000 ]; then
     echo "    -> Reusing cached mt5setup.exe ($(du -sh $SETUP_FILE | cut -f1)). Skipping download."
 else
-    echo "    -> Downloading via Cloudflare WARP (full speed, no proxy overhead)..."
+    echo "    -> Downloading via Cloudflare WARP (full speed)..."
     wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
         curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
 
@@ -177,13 +195,12 @@ else
 
     if [ "$FILESIZE" -lt 1000000 ]; then
         echo ""
-        echo "ERROR: Download failed (${FILESIZE} bytes) even with WARP."
+        echo "ERROR: Download failed (${FILESIZE} bytes)."
+        echo "  WARP status:    warp-cli status"
+        echo "  Reconnect WARP: warp-cli disconnect && warp-cli connect && sleep 10"
+        echo "  Then retry:     bash $0 $*"
         echo ""
-        echo "  Check WARP status:  warp-cli status"
-        echo "  Reconnect WARP:     warp-cli disconnect && warp-cli connect && sleep 10"
-        echo "  Then retry:         bash $0 $*"
-        echo ""
-        echo "  OR manual SCP from your LOCAL PC:"
+        echo "  OR manual SCP from LOCAL PC:"
         echo "  curl -o mt5setup.exe '${MT5_CDN}'"
         echo "  scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):${SETUP_FILE}"
         rm -f "$SETUP_FILE"
@@ -192,11 +209,9 @@ else
     echo "    -> Downloaded: $(du -sh $SETUP_FILE | cut -f1)"
 fi
 
-# Symlink to /tmp for Wine install command
 ln -sf "$SETUP_FILE" /tmp/mt5setup.exe
 
 # --- [5b/8] WINE PREFIX INIT + MT5 INSTALL ---
-# WARP is still active — Wine installer CDN calls also go through Cloudflare
 echo "    -> Initializing Wine prefix..."
 export WINEPREFIX=/opt/mt5master
 export WINEARCH=win64
@@ -220,7 +235,6 @@ for i in {1..60}; do
     sleep 5
 done
 
-# Gracefully stop installer
 kill $INSTALL_PID 2>/dev/null || true
 wait $INSTALL_PID 2>/dev/null || true
 pkill -f mt5setup 2>/dev/null || true
@@ -237,7 +251,6 @@ echo "    -> Installed at: $MT5_DIR"
 
 # --- [6/8] CLEAR CLOUD.PING ---
 echo "==> [6/8] Clearing Cloud.Ping cache for clean cloud connection..."
-# Use HKCU (current user) — not HKEY_USERS\S-1-5-18 (SYSTEM account)
 WINEPREFIX="$WINEPREFIX" WINEARCH=win64 wine reg delete \
     "HKCU\\Software\\MetaQuotes Software\\Cloud.Ping" \
     /f >/dev/null 2>&1 || true
@@ -250,7 +263,6 @@ mkdir -p /opt/mt5
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
-# Write start-all.sh header
 cat > /opt/mt5/start-all.sh << 'STARTEOF'
 #!/bin/bash
 # Restart all MT5 cloud agents
@@ -260,7 +272,6 @@ pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f wineserver 2>/dev/null || true
 sleep 5
 ulimit -n 100000
-# Ensure WARP is connected on reboot
 warp-cli connect >/dev/null 2>&1 || true
 sleep 3
 STARTEOF
@@ -269,13 +280,11 @@ for P in $(seq $SP $EP); do
     echo "    -> Deploying agent on port $P..."
     AGENT_WP="/opt/mt5agent-$P"
 
-    # Clone master prefix — exclude lock files to avoid stale Wine locks
     rsync -a --exclude='*.lock' "$WINEPREFIX/" "$AGENT_WP/"
 
     AGENT_EX=$(find $AGENT_WP -name "metatester64.exe" 2>/dev/null | head -1)
     AGENT_WIN_EX="$(echo "$AGENT_EX" | sed "s|$AGENT_WP/drive_c|C:|" | sed 's|/|\\|g')"
 
-    # Clear Cloud.Ping in each cloned prefix under HKCU
     WINEPREFIX="$AGENT_WP" WINEARCH=win64 wine reg delete \
         "HKCU\\Software\\MetaQuotes Software\\Cloud.Ping" \
         /f >/dev/null 2>&1 || true
@@ -299,9 +308,7 @@ for P in $(seq $SP $EP); do
         chmod 600 "$CONFIG_DIR/metatester.ini"
     fi
 
-    # Dedicated per-agent launcher script — avoids nested quoting in start-all.sh
     AGENT_SCRIPT="/opt/mt5/run-agent-$P.sh"
-    # Deterministic Xvfb display: port 3000=:10, 3001=:11, etc.
     DISP=$((P - 2990))
 
     cat > "$AGENT_SCRIPT" << AGENTEOF
@@ -321,13 +328,12 @@ AGENTEOF
     screen -dmS "mt5-$P" bash "$AGENT_SCRIPT"
     echo "      -> Agent $P launched: screen -r mt5-$P"
 
-    # Append clean single-line call — no nested quoting issues
     echo "screen -dmS mt5-$P bash '$AGENT_SCRIPT'" >> /opt/mt5/start-all.sh
 done
 
 chmod +x /opt/mt5/start-all.sh
 
-# @reboot — 45s delay ensures WARP + network + fstab mounts are ready
+# @reboot: WARP connect → RAM clear → agents
 (crontab -l 2>/dev/null | grep -v mt5; \
     echo "@reboot sleep 45 && warp-cli connect && sleep 5 && /usr/local/bin/clear-ram-cache.sh && /opt/mt5/start-all.sh") | crontab -
 echo "    -> @reboot cron added (45s boot delay + WARP reconnect)."
@@ -355,6 +361,7 @@ for i in {1..60}; do
         echo ""
         echo "  WARP Status:  warp-cli status"
         echo "  Exit IP:      curl -s https://cloudflare.com/cdn-cgi/trace | grep ip="
+        echo "  Swap:         free -h"
         echo ""
         echo "  Commands:"
         echo "    screen -ls                          (list all sessions)"
@@ -368,9 +375,15 @@ for i in {1..60}; do
         echo "    (look for: Network server agentX.mql5.net ping XX ms)"
         echo "    Also check: https://cloud.mql5.com"
         echo ""
-        echo "  NOTE: /opt/mt5setup.exe is preserved."
-        echo "        Re-running skips the download step automatically."
+        echo "  NOTE: /opt/mt5setup.exe is preserved for reruns."
         echo "============================================="
+
+        # --- RAM CACHE CLEAR — runs here, AFTER agents are confirmed online ---
+        echo ""
+        echo "  Clearing RAM cache now that all agents are up..."
+        /usr/local/bin/clear-ram-cache.sh
+        echo "  -> RAM cache cleared. Free memory:"
+        free -h | grep -E "Mem|Swap"
         exit 0
     fi
     echo "    ...Waiting ($((i*5))s / 300s)..."
@@ -381,3 +394,7 @@ echo ""
 echo "TIMEOUT: Agents may still be starting up."
 echo "  Attach to see live output: screen -r mt5-3000"
 echo "  Check all sessions:        screen -ls"
+echo ""
+echo "  Clearing RAM cache anyway..."
+/usr/local/bin/clear-ram-cache.sh
+free -h | grep -E "Mem|Swap"
