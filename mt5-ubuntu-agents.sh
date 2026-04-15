@@ -19,15 +19,16 @@ MQL5_LOGIN=$3
 export DEBIAN_FRONTEND=noninteractive
 
 echo "==> [1/7] Wiping Old Installations..."
-sudo killall -9 wine wineserver xvfb-run Xvfb metatester64.exe 2>/dev/null || true
+sudo killall -9 wine wineserver xvfb-run Xvfb metatester64.exe fluxbox 2>/dev/null || true
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
 sudo rm -rf /opt/mt5* /tmp/mt5* ~/.wine /root/.wine /etc/systemd/system/mt5-agent* >/dev/null 2>&1 || true
 sudo systemctl daemon-reload
 
-echo "==> [2/7] Verifying Dependencies..."
+echo "==> [2/7] Verifying Dependencies (Adding Headless Window Manager)..."
 sudo dpkg --add-architecture i386
 sudo apt-get update -y >/dev/null
-sudo apt-get install -y wine32 wine64 xvfb wget cabextract winbind net-tools >/dev/null 2>&1
+# THE FIX: Added 'fluxbox' - a micro window manager that provides the OLE interfaces Wine is crashing over
+sudo apt-get install -y wine32 wine64 xvfb fluxbox wget cabextract winbind net-tools >/dev/null 2>&1
 
 echo "==> [3/7] Setting up 64GB Swap & Network..."
 if ! swapon --show | grep -q "/swapfile"; then
@@ -38,7 +39,6 @@ if ! swapon --show | grep -q "/swapfile"; then
     sudo swapon /swapfile || true
 fi
 
-# THE FIX: Create a dedicated, non-root user so MetaTester doesn't self-terminate
 echo "==> [4/7] Creating Dedicated 'mt5user' & Initializing Wine Environment..."
 if ! id "mt5user" &>/dev/null; then
     sudo useradd -m -s /bin/bash mt5user
@@ -48,7 +48,7 @@ MASTER_WP="/opt/mt5master"
 sudo mkdir -p "$MASTER_WP"
 sudo chown -R mt5user:mt5user "$MASTER_WP"
 
-# Initialize Wine strictly as the mt5user
+# Initialize Wine
 sudo -u mt5user env WINEPREFIX="$MASTER_WP" WINEARCH=win64 WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wineboot -u >/dev/null 2>&1
 
 echo "==> [5/7] Downloading metatester64.exe..."
@@ -57,7 +57,7 @@ sudo -u mt5user mkdir -p "$(dirname "$MASTER_EX")"
 sudo -u mt5user wget --show-progress -q -O "$MASTER_EX" "https://github.com/rockitya/mt5-ubuntu-agents.sh/raw/main/metatester64.exe"
 sudo -u mt5user chmod +x "$MASTER_EX"
 
-echo "==> [6/7] Deploying SystemD Agents..."
+echo "==> [6/7] Deploying OLE-Compatible SystemD Agents..."
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
@@ -93,7 +93,35 @@ SellComputingResources=1
 INI
     fi
 
-    # THE FIX: Run the background service as 'mt5user', passing all security checks
+    # THE FIX: Create a dedicated launch script for each agent that pairs Fluxbox and Wine perfectly
+    LAUNCH_SCRIPT="/opt/mt5agent-$P/launch.sh"
+    cat << EOF | sudo tee "$LAUNCH_SCRIPT" >/dev/null
+#!/bin/bash
+export WINEPREFIX="$AGENT_WP"
+export WINEARCH=win64
+export WINEDLLOVERRIDES="mscoree,mshtml="
+export DISPLAY=:$P
+
+# Start dedicated virtual monitor
+Xvfb :$P -screen 0 1024x768x16 &
+XVFB_PID=\$!
+sleep 2
+
+# Start Fluxbox Window Manager so OLE/COM has an interface to bind to
+fluxbox &
+FLUX_PID=\$!
+sleep 2
+
+# Launch MetaTester natively in this environment
+wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
+
+# Cleanup if exited
+kill \$FLUX_PID \$XVFB_PID
+EOF
+    sudo chmod +x "$LAUNCH_SCRIPT"
+    sudo chown mt5user:mt5user "$LAUNCH_SCRIPT"
+
+    # THE FIX: SystemD now just calls our clean launch script
     cat << EOF | sudo tee /etc/systemd/system/mt5-agent-$P.service >/dev/null
 [Unit]
 Description=MT5 Strategy Tester Agent on Port $P
@@ -103,11 +131,7 @@ After=network.target
 Type=simple
 User=mt5user
 Group=mt5user
-Environment=WINEPREFIX=$AGENT_WP
-Environment=WINEARCH=win64
-Environment=WINEDLLOVERRIDES="mscoree,mshtml="
-LimitNOFILE=65536
-ExecStart=/usr/bin/xvfb-run -a /usr/bin/wine "$AGENT_EX" /address:0.0.0.0:$P /password:$PW $ACCOUNT_FLAG
+ExecStart=$LAUNCH_SCRIPT
 Restart=always
 RestartSec=10
 SendSIGKILL=no
