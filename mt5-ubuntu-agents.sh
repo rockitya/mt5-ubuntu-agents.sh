@@ -6,9 +6,9 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────
 # Steps:
 #  0. Uninstall old Wine / MetaTester / packages
-#  1. Disable firewall (ufw)
+#  1. Disable firewall (ufw + iptables)
 #  2. Install Wine + WARP + x11vnc + noVNC + tools
-#  3. Connect WARP
+#  3. Connect WARP (auto-accept TOS)
 #  4. Setup 64GB Swap + ZRAM
 #  5. Download mt5setup.exe (fresh via WARP)
 #  6. Install master MetaTester Wine prefix
@@ -60,33 +60,30 @@ echo "============================================="
 # ────────────────────────────────────────────────────────────
 echo "==> [0/11] Uninstall old MetaTester + Wine + packages"
 
-# Kill all running MT5/Wine/screen processes
 echo "    -> Killing old processes..."
-pkill -9 -f metatester64  2>/dev/null || true
-pkill -9 -f wineserver    2>/dev/null || true
-pkill -9 -f wine          2>/dev/null || true
-pkill -9 -f Xvfb          2>/dev/null || true
-pkill -9 -f x11vnc        2>/dev/null || true
-pkill -9 -f websockify    2>/dev/null || true
+pkill -9 -f metatester64 2>/dev/null || true
+pkill -9 -f wineserver   2>/dev/null || true
+pkill -9 -f wine         2>/dev/null || true
+pkill -9 -f Xvfb         2>/dev/null || true
+pkill -9 -f x11vnc       2>/dev/null || true
+pkill -9 -f websockify   2>/dev/null || true
+pkill -9 -f warp-cli     2>/dev/null || true
+pkill -9 -f warp-svc     2>/dev/null || true
 screen -ls 2>/dev/null | awk '/\.mt5-/{print $1}' \
     | xargs -r -I{} screen -S {} -X quit 2>/dev/null || true
 screen -wipe 2>/dev/null || true
 sleep 3
 
-# Remove all MT5 Wine prefixes and data
 echo "    -> Removing /opt/mt5* directories..."
 rm -rf /opt/mt5master   2>/dev/null || true
 rm -rf /opt/mt5agent-*  2>/dev/null || true
 rm -rf /opt/mt5         2>/dev/null || true
 rm -rf /opt/mt5-docker  2>/dev/null || true
 rm -f  /tmp/mt5setup.exe 2>/dev/null || true
-rm -f  /tmp/.X*-lock 2>/dev/null || true
-rm -rf /tmp/.X11-unix 2>/dev/null || true
+rm -f  /tmp/.X*-lock    2>/dev/null || true
+rm -rf /tmp/.X11-unix   2>/dev/null || true
+rm -rf /root/.wine      2>/dev/null || true
 
-# Remove Wine user prefix if exists
-rm -rf /root/.wine 2>/dev/null || true
-
-# Uninstall Wine + related packages
 echo "    -> Uninstalling Wine packages..."
 apt-get remove --purge -y \
     winehq-devel winehq-stable winehq-staging \
@@ -95,52 +92,46 @@ apt-get remove --purge -y \
     libwine fonts-wine \
     2>/dev/null || true
 
-# Uninstall VNC + noVNC packages
 echo "    -> Uninstalling VNC/noVNC packages..."
 apt-get remove --purge -y \
     x11vnc novnc python3-websockify \
     2>/dev/null || true
 
-# Uninstall WARP
-echo "    -> Uninstalling Cloudflare WARP..."
-warp-cli disconnect 2>/dev/null || true
+echo "    -> Uninstalling Cloudflare WARP (no prompt)..."
+systemctl stop    warp-svc 2>/dev/null || true
+systemctl disable warp-svc 2>/dev/null || true
 apt-get remove --purge -y cloudflare-warp 2>/dev/null || true
+rm -rf /var/lib/cloudflare-warp 2>/dev/null || true
+rm -rf /etc/cloudflare-warp     2>/dev/null || true
 
-# Uninstall ZRAM
 echo "    -> Uninstalling ZRAM..."
-systemctl stop zramswap 2>/dev/null || true
+systemctl stop    zramswap 2>/dev/null || true
 systemctl disable zramswap 2>/dev/null || true
 apt-get remove --purge -y zram-tools 2>/dev/null || true
 
-# Remove old swap
 echo "    -> Removing old swap..."
 swapoff /swapfile 2>/dev/null || true
-swapoff -a 2>/dev/null || true
+swapoff -a        2>/dev/null || true
 sed -i '\|/swapfile none swap sw 0 0|d' /etc/fstab 2>/dev/null || true
 rm -f /swapfile 2>/dev/null || true
 
-# Remove old repo files
-echo "    -> Removing old repo configs..."
-rm -f /etc/apt/sources.list.d/winehq-*.sources  2>/dev/null || true
-rm -f /etc/apt/sources.list.d/cloudflare-*.list 2>/dev/null || true
-rm -f /etc/apt/sources.list.d/docker.list        2>/dev/null || true
-rm -f /etc/apt/keyrings/winehq-archive.key       2>/dev/null || true
+echo "    -> Removing old repo + config files..."
+rm -f /etc/apt/sources.list.d/winehq-*.sources   2>/dev/null || true
+rm -f /etc/apt/sources.list.d/cloudflare-*.list  2>/dev/null || true
+rm -f /etc/apt/sources.list.d/docker.list         2>/dev/null || true
+rm -f /etc/apt/keyrings/winehq-archive.key        2>/dev/null || true
 rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null || true
-rm -f /etc/default/zramswap 2>/dev/null || true
-rm -f /etc/sysctl.d/99-mt5.conf 2>/dev/null || true
-rm -f /usr/local/bin/clear-ram-cache.sh 2>/dev/null || true
-rm -f /opt/mt5/novnc.pem 2>/dev/null || true
+rm -f /etc/default/zramswap                       2>/dev/null || true
+rm -f /etc/sysctl.d/99-mt5.conf                   2>/dev/null || true
+rm -f /usr/local/bin/clear-ram-cache.sh           2>/dev/null || true
 
-# Clean cron entries
 echo "    -> Cleaning old cron entries..."
 (crontab -l 2>/dev/null \
     | grep -v 'start-all\|clear-ram-cache' \
     || true) | crontab - 2>/dev/null || true
 
-# Final apt cleanup
 apt-get autoremove -y >/dev/null 2>&1 || true
 apt-get autoclean    -y >/dev/null 2>&1 || true
-
 echo "    -> Uninstall complete"
 
 # ────────────────────────────────────────────────────────────
@@ -148,7 +139,6 @@ echo "    -> Uninstall complete"
 # ────────────────────────────────────────────────────────────
 echo "==> [1/11] Disable firewall"
 
-# UFW
 if command -v ufw &>/dev/null; then
     ufw disable 2>/dev/null || true
     echo "    -> UFW disabled"
@@ -156,22 +146,20 @@ else
     echo "    -> UFW not installed"
 fi
 
-# iptables — flush all rules
-iptables  -F 2>/dev/null || true
-iptables  -X 2>/dev/null || true
-iptables  -t nat -F 2>/dev/null || true
-iptables  -t mangle -F 2>/dev/null || true
+iptables  -F            2>/dev/null || true
+iptables  -X            2>/dev/null || true
+iptables  -t nat    -F  2>/dev/null || true
+iptables  -t mangle -F  2>/dev/null || true
 iptables  -P INPUT   ACCEPT 2>/dev/null || true
 iptables  -P FORWARD ACCEPT 2>/dev/null || true
 iptables  -P OUTPUT  ACCEPT 2>/dev/null || true
 
-ip6tables -F 2>/dev/null || true
-ip6tables -X 2>/dev/null || true
+ip6tables -F            2>/dev/null || true
+ip6tables -X            2>/dev/null || true
 ip6tables -P INPUT   ACCEPT 2>/dev/null || true
 ip6tables -P FORWARD ACCEPT 2>/dev/null || true
 ip6tables -P OUTPUT  ACCEPT 2>/dev/null || true
 
-# Disable firewalld if present
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     systemctl stop    firewalld 2>/dev/null || true
     systemctl disable firewalld 2>/dev/null || true
@@ -188,13 +176,11 @@ dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings /usr/share/keyrings
 UBUNTU_VER="$(lsb_release -cs)"
 
-# WineHQ repo
 wget -q -O /etc/apt/keyrings/winehq-archive.key \
     https://dl.winehq.org/wine-builds/winehq.key
 wget -q -NP /etc/apt/sources.list.d/ \
     "https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_VER}/winehq-${UBUNTU_VER}.sources"
 
-# Cloudflare WARP repo
 curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
     | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
@@ -215,12 +201,20 @@ echo "    -> $(wine --version)"
 echo "    -> noVNC: $(dpkg -s novnc 2>/dev/null | grep Version: || echo ok)"
 
 # ────────────────────────────────────────────────────────────
-# [3/11] CONNECT WARP
+# [3/11] CONNECT WARP (auto-accept TOS)
 # ────────────────────────────────────────────────────────────
-echo "==> [3/11] Connect Cloudflare WARP"
-warp-cli --accept-tos registration new >/dev/null 2>&1 || true
-warp-cli --accept-tos register        >/dev/null 2>&1 || true
-warp-cli connect                       >/dev/null 2>&1 || true
+echo "==> [3/11] Connect Cloudflare WARP (auto TOS)"
+
+systemctl enable  warp-svc >/dev/null 2>&1 || true
+systemctl restart warp-svc >/dev/null 2>&1 || true
+sleep 3
+
+# Use yes | to silently answer TOS prompt
+yes | warp-cli registration new >/dev/null 2>&1 || true
+yes | warp-cli register         >/dev/null 2>&1 || true
+sleep 2
+
+warp-cli connect >/dev/null 2>&1 || true
 
 WARP_OK=0
 for i in {1..20}; do
@@ -265,16 +259,14 @@ else
     echo "    WARNING: Swap smaller than expected – check df -h /"
 fi
 
-# ZRAM (compressed RAM from physical memory)
 cat > /etc/default/zramswap <<'EOF'
 ALGO=lz4
 PERCENT=50
 PRIORITY=100
 EOF
-systemctl enable zramswap >/dev/null 2>&1 || true
+systemctl enable  zramswap >/dev/null 2>&1 || true
 systemctl restart zramswap >/dev/null 2>&1 || true
 
-# Kernel tuning
 cat > /etc/sysctl.d/99-mt5.conf <<'EOF'
 vm.swappiness=10
 vm.vfs_cache_pressure=80
@@ -288,9 +280,9 @@ EOF
 sysctl -p /etc/sysctl.d/99-mt5.conf >/dev/null 2>&1 || true
 
 echo "    -> Memory status:"
-free -h    || true
+free -h       || true
 swapon --show || true
-zramctl    || true
+zramctl       || true
 
 # ────────────────────────────────────────────────────────────
 # [5/11] DOWNLOAD mt5setup.exe FRESH VIA WARP
@@ -306,9 +298,8 @@ FILESIZE="$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)"
 if [ "$FILESIZE" -lt 100000 ]; then
     echo ""
     echo "ERROR: Download failed (${FILESIZE} bytes)"
-    echo "  WARP status   : warp-cli status"
-    echo "  Reconnect     : warp-cli disconnect && warp-cli connect"
-    echo "  Manual SCP    : scp mt5setup.exe root@$SERVER_IP:/tmp/mt5setup.exe"
+    echo "  Reconnect WARP : warp-cli disconnect && warp-cli connect"
+    echo "  Manual SCP     : scp mt5setup.exe root@$SERVER_IP:/tmp/mt5setup.exe"
     exit 1
 fi
 echo "    -> Downloaded: $(du -sh "$SETUP_FILE" | cut -f1)"
@@ -340,20 +331,18 @@ INSTALL_PID=$!
 
 FOUND=0
 for i in {1..120}; do
-    # WARP health check every 60s
     if [ $(( i % 12 )) -eq 0 ]; then
         if ! warp-cli status 2>/dev/null | grep -qi "Connected"; then
             echo "    WARNING: WARP dropped – reconnecting..."
-            warp-cli disconnect >/dev/null 2>&1 || true
-            sleep 2
-            warp-cli connect    >/dev/null 2>&1 || true
+            yes | warp-cli register >/dev/null 2>&1 || true
+            warp-cli connect        >/dev/null 2>&1 || true
             sleep 5
         fi
     fi
 
     if find "$WINEPREFIX" -name "metatester64.exe" 2>/dev/null | grep -q .; then
         FOUND=1
-        echo "    -> metatester64.exe found after $((i*5))s – waiting 15s to settle..."
+        echo "    -> metatester64.exe found after $((i*5))s – settling 15s..."
         sleep 15
         break
     fi
@@ -370,14 +359,13 @@ rm -f /tmp/.X90-lock /tmp/.X11-unix/X90 2>/dev/null || true
 MT5_DIR="$(find "$WINEPREFIX" -name metatester64.exe \
     -exec dirname {} \; 2>/dev/null | head -1 || true)"
 if [ -z "$MT5_DIR" ] || [ "$FOUND" -ne 1 ]; then
-    echo "ERROR: MetaTester install failed – metatester64.exe not found"
+    echo "ERROR: MetaTester install failed"
     echo "---- install log ----"
     tail -n 60 /tmp/mt5-install.log || true
     exit 1
 fi
 echo "    -> Installed at: $MT5_DIR"
 
-# Clear Cloud.Ping cache on master
 wine reg delete "HKCU\\Software\\MetaQuotes Software\\Cloud.Ping" \
     /f >/dev/null 2>&1 || true
 
@@ -397,7 +385,8 @@ screen -ls 2>/dev/null | awk '/\\.mt5-/{print \$1}' \\
     | xargs -r -I{} screen -S {} -X quit 2>/dev/null || true
 screen -wipe 2>/dev/null || true
 rm -f /tmp/.X*-lock /tmp/.X11-unix/X* 2>/dev/null || true
-warp-cli connect >/dev/null 2>&1 || true
+yes | warp-cli register >/dev/null 2>&1 || true
+warp-cli connect        >/dev/null 2>&1 || true
 sleep 5
 ulimit -n 100000
 for P in \$(seq $SP $EP); do
@@ -465,7 +454,6 @@ warp-cli status 2>/dev/null || echo "  not running"
 echo ""
 echo "=== Firewall ==="
 ufw status 2>/dev/null || echo "  UFW not installed"
-iptables -L INPUT --line-numbers 2>/dev/null | head -5 || true
 echo ""
 echo "=== noVNC ==="
 pgrep -a websockify 2>/dev/null || echo "  not running"
@@ -480,8 +468,8 @@ openssl req -x509 -nodes -newkey rsa:2048 \
 
 cat > /opt/mt5/open-for-cloud.sh <<EOF
 #!/bin/bash
-pkill -9 -f x11vnc     2>/dev/null || true
-pkill -9 -f websockify  2>/dev/null || true
+pkill -9 -f x11vnc    2>/dev/null || true
+pkill -9 -f websockify 2>/dev/null || true
 sleep 2
 
 rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null || true
@@ -503,7 +491,8 @@ websockify -D \\
 sleep 2
 
 MT5_EX="\$(find /opt/mt5master -name metatester64.exe 2>/dev/null | head -1)"
-[ -z "\$MT5_EX" ] && MT5_EX="\$(find /opt/mt5agent-3000 -name metatester64.exe 2>/dev/null | head -1)"
+[ -z "\$MT5_EX" ] && \\
+    MT5_EX="\$(find /opt/mt5agent-3000 -name metatester64.exe 2>/dev/null | head -1)"
 
 WINEPREFIX=/opt/mt5master WINEARCH=win64 WINEDEBUG=-all \\
     DISPLAY=:10 wine "\$MT5_EX" >/tmp/mt5-vnc.log 2>&1 &
@@ -512,9 +501,8 @@ echo ""
 echo "============================================"
 echo " noVNC Running!"
 echo "============================================"
-echo ""
-echo " Browser: https://$SERVER_IP:$NOVNC_PORT/vnc.html"
-echo " VNC Password: $VNC_PASS"
+echo " Browser  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
+echo " Password : $VNC_PASS"
 echo ""
 echo " IN MetaTester window:"
 echo "   → Tab: MQL5 Cloud Network"
@@ -523,7 +511,8 @@ echo "   → Login: your MQL5 username"
 echo "   → Password: your MQL5 account password"
 echo "   → Click: Apply"
 echo ""
-echo " After Apply: /opt/mt5/cloud-on.sh YOUR_MQL5_LOGIN"
+echo " After Apply:"
+echo "   /opt/mt5/cloud-on.sh YOUR_MQL5_LOGIN"
 echo "============================================"
 EOF
 chmod +x /opt/mt5/open-for-cloud.sh
@@ -531,8 +520,8 @@ chmod +x /opt/mt5/open-for-cloud.sh
 # ── start-novnc.sh (standalone, no MetaTester) ───────────
 cat > /opt/mt5/start-novnc.sh <<EOF
 #!/bin/bash
-pkill -9 -f x11vnc     2>/dev/null || true
-pkill -9 -f websockify  2>/dev/null || true
+pkill -9 -f x11vnc    2>/dev/null || true
+pkill -9 -f websockify 2>/dev/null || true
 sleep 2
 rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null || true
 Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb-vnc.log 2>&1 &
@@ -565,7 +554,9 @@ for P in $(seq "$SP" "$EP"); do
         echo "ERROR: metatester64.exe missing in $AGENT_WP"
         exit 1
     fi
-    AGENT_WIN_EX="$(echo "$AGENT_EX" | sed "s|$AGENT_WP/drive_c|C:|" | sed 's|/|\\|g')"
+    AGENT_WIN_EX="$(echo "$AGENT_EX" \
+        | sed "s|$AGENT_WP/drive_c|C:|" \
+        | sed 's|/|\\|g')"
 
     cat > "/opt/mt5/run-agent-$P.sh" <<AGENTEOF
 #!/bin/bash
@@ -588,7 +579,8 @@ Xvfb :${DISP} -screen 0 1024x768x24 >/tmp/xvfb-${P}.log 2>&1 &
 XVFB_PID=\$!
 sleep 3
 
-warp-cli connect >/dev/null 2>&1 || true
+yes | warp-cli register >/dev/null 2>&1 || true
+warp-cli connect        >/dev/null 2>&1 || true
 sleep 2
 
 # CPU-affinity + cores trick (hides extra CPUs from Wine)
@@ -606,7 +598,8 @@ done
 
 # @reboot cron
 (crontab -l 2>/dev/null | grep -v '@reboot .*start-all' || true; \
- echo "@reboot sleep 45 && warp-cli connect && sleep 5 && /opt/mt5/start-all.sh") | crontab -
+ echo "@reboot sleep 45 && warp-cli connect && sleep 5 && /opt/mt5/start-all.sh") \
+    | crontab -
 echo "    -> @reboot cron added"
 
 # ────────────────────────────────────────────────────────────
@@ -658,7 +651,6 @@ echo 1 > /proc/sys/vm/drop_caches
 EOF
 chmod +x /usr/local/bin/clear-ram-cache.sh
 
-# Add 30-min cron for ongoing cleanup
 (crontab -l 2>/dev/null | grep -v clear-ram-cache || true; \
     echo "*/30 * * * * /usr/local/bin/clear-ram-cache.sh") | crontab -
 
@@ -678,27 +670,26 @@ cat <<DONE
 =====================================================
  SETUP COMPLETE
 =====================================================
-
  Agents   : $ONLINE / $AGENTS running (local-only)
- Swap     : ${SWAP_GB}GB active on /swapfile
+ Swap     : ${SWAP_GB}GB on /swapfile
  ZRAM     : 50% compressed RAM (lz4)
- WARP     : Cloudflare exit IP active
+ WARP     : auto TOS accepted + connected
  Firewall : disabled (ufw + iptables flushed)
  CPU trick: taskset + NUMBER_OF_PROCESSORS=1
 
  ─────────────────────────────────────────────────
- STEP 1 — Register cloud (ONE TIME via browser):
+ STEP 1 — Register cloud (ONE TIME):
    https://$SERVER_IP:$NOVNC_PORT/vnc.html
    VNC Password: $VNC_PASS
 
    In MetaTester window:
    → Tab: MQL5 Cloud Network
    → Tick: Allow public use of agents
-   → Login: your MQL5 username (e.g. rcktya)
+   → Login: your MQL5 username
    → Password: your MQL5 account password
    → Click: Apply
 
- STEP 2 — After Apply:
+ STEP 2 — After clicking Apply:
    /opt/mt5/cloud-on.sh rcktya
 
  ─────────────────────────────────────────────────
