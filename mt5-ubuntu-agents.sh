@@ -174,42 +174,37 @@ chmod +x /usr/local/bin/clear-ram-cache.sh
 (crontab -l 2>/dev/null | grep -v clear-ram-cache; echo "*/30 * * * * /usr/local/bin/clear-ram-cache.sh") | crontab -
 echo "    -> RAM cache script created. Will run AFTER agents are up. Cron: every 30 min."
 
-# --- [5/8] MT5 SETUP DOWNLOAD (ONCE ONLY, REUSE ON RERUNS) ---
+# --- [5/8] MT5 SETUP DOWNLOAD (FRESH EVERY RUN) ---
 # mt5setup.exe is a WEB INSTALLER — it also pulls MT5 from CDN at install time.
 # WARP covers both automatically (system-level IP change, no proxy wrapper needed).
-echo "==> [5/8] Checking for mt5setup.exe..."
+echo "==> [5/8] Downloading mt5setup.exe (fresh every run)..."
 
-SETUP_FILE="/opt/mt5setup.exe"
+SETUP_FILE="/tmp/mt5setup.exe"
 MT5_CDN="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+
+rm -f "$SETUP_FILE" 2>/dev/null || true
+
+echo "    -> Downloading via Cloudflare WARP (full speed)..."
+wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
+    curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
 
 FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 
-if [ "$FILESIZE" -gt 1000000 ]; then
-    echo "    -> Reusing cached mt5setup.exe ($(du -sh $SETUP_FILE | cut -f1)). Skipping download."
-else
-    echo "    -> Downloading via Cloudflare WARP (full speed)..."
-    wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
-        curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
-
-    FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
-
-    if [ "$FILESIZE" -lt 1000000 ]; then
-        echo ""
-        echo "ERROR: Download failed (${FILESIZE} bytes)."
-        echo "  WARP status:    warp-cli status"
-        echo "  Reconnect WARP: warp-cli disconnect && warp-cli connect && sleep 10"
-        echo "  Then retry:     bash $0 $*"
-        echo ""
-        echo "  OR manual SCP from LOCAL PC:"
-        echo "  curl -o mt5setup.exe '${MT5_CDN}'"
-        echo "  scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):${SETUP_FILE}"
-        rm -f "$SETUP_FILE"
-        exit 1
-    fi
-    echo "    -> Downloaded: $(du -sh $SETUP_FILE | cut -f1)"
+if [ "$FILESIZE" -lt 1000000 ]; then
+    echo ""
+    echo "ERROR: Download failed (${FILESIZE} bytes)."
+    echo "  WARP status:    warp-cli status"
+    echo "  Reconnect WARP: warp-cli disconnect && warp-cli connect && sleep 10"
+    echo "  Then retry:     bash $0 $*"
+    echo ""
+    echo "  OR manual SCP from LOCAL PC:"
+    echo "  curl -o mt5setup.exe '${MT5_CDN}'"
+    echo "  scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):${SETUP_FILE}"
+    rm -f "$SETUP_FILE"
+    exit 1
 fi
-
-ln -sf "$SETUP_FILE" /tmp/mt5setup.exe
+echo "    -> Downloaded: $(du -sh $SETUP_FILE | cut -f1)"
+# No symlink needed — already at /tmp/mt5setup.exe
 
 # --- [5b/8] WINE PREFIX INIT + MT5 INSTALL ---
 echo "    -> Initializing Wine prefix..."
@@ -375,7 +370,7 @@ for i in {1..60}; do
         echo "    (look for: Network server agentX.mql5.net ping XX ms)"
         echo "    Also check: https://cloud.mql5.com"
         echo ""
-        echo "  NOTE: /opt/mt5setup.exe is preserved for reruns."
+        echo "  NOTE: mt5setup.exe is downloaded fresh on every run."
         echo "============================================="
 
         # --- RAM CACHE CLEAR — runs here, AFTER agents are confirmed online ---
