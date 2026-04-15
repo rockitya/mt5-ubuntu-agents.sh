@@ -5,7 +5,9 @@ set -e
 # Usage: bash mt5-ubuntu-agents.sh [CORES] [PASSWORD] [MQL5_LOGIN]
 # Example: bash mt5-ubuntu-agents.sh 7 Prem@1996 rcktya
 #
-# CDN blocked? No problem — Tor is used automatically for download + install.
+# CDN blocked? No problem — Cloudflare WARP is used automatically.
+# WARP changes the server exit IP via Cloudflare, bypassing MetaQuotes block.
+#
 # Already have mt5setup.exe? SCP it once and it's reused forever:
 #   scp mt5setup.exe root@SERVER:/opt/mt5setup.exe
 #
@@ -56,45 +58,57 @@ crontab -l 2>/dev/null | grep -v mt5 | grep -v clear-ram | crontab - 2>/dev/null
 rm -f /usr/local/bin/clear-ram-cache.sh 2>/dev/null || true
 echo "    -> Done."
 
-# --- [2/8] WINE DEVEL + TOR + PROXYCHAINS ---
-echo "==> [2/8] Installing WineHQ Devel + Tor + Proxychains..."
+# --- [2/8] WINE DEVEL + CLOUDFLARE WARP ---
+echo "==> [2/8] Installing WineHQ Devel + Cloudflare WARP..."
 dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings
+
+# WineHQ repo
 wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
 UBUNTU_VER=$(lsb_release -cs)
 wget -q -NP /etc/apt/sources.list.d/ \
     "https://dl.winehq.org/wine-builds/ubuntu/dists/$UBUNTU_VER/winehq-$UBUNTU_VER.sources"
+
+# Cloudflare WARP repo
+curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | \
+    gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] \
+    https://pkg.cloudflareclient.com/ ${UBUNTU_VER} main" | \
+    tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+
 apt-get update -y >/dev/null
 apt-get install -y --install-recommends \
     winehq-devel xvfb screen wget net-tools cabextract curl rsync \
-    tor torsocks proxychains4 >/dev/null 2>&1
+    cloudflare-warp >/dev/null 2>&1
 
-# Configure proxychains: dynamic chain through Tor SOCKS5 on 127.0.0.1:9050
-sed -i 's/^strict_chain/#strict_chain/'     /etc/proxychains4.conf
-sed -i 's/^#dynamic_chain/dynamic_chain/'   /etc/proxychains4.conf
-sed -i 's/^#proxy_dns/proxy_dns/'           /etc/proxychains4.conf
-sed -i '/^socks/d'                           /etc/proxychains4.conf
-echo "socks5 127.0.0.1 9050"               >> /etc/proxychains4.conf
+echo "    -> $(wine --version)"
 
-# Start Tor service
-systemctl start tor
-systemctl enable tor >/dev/null 2>&1
+# Connect Cloudflare WARP — changes server exit IP to Cloudflare, bypasses MetaQuotes CDN block
+echo "    -> Connecting Cloudflare WARP..."
+warp-cli --accept-tos register >/dev/null 2>&1 || true
+warp-cli connect >/dev/null 2>&1 || true
 
-# Wait for Tor SOCKS port to be listening (local check — no external connection needed)
-echo "    -> Waiting for Tor SOCKS port 9050..."
-for i in {1..30}; do
-    if ss -tuln 2>/dev/null | grep -q ':9050 '; then
-        echo "    -> Tor SOCKS port ready after $((i*2))s."
+# Wait for WARP to establish connection (up to 30s)
+WARP_READY=0
+for i in {1..15}; do
+    STATUS=$(warp-cli status 2>/dev/null | grep -i "Status" | head -1 || echo "")
+    if echo "$STATUS" | grep -qi "Connected"; then
+        echo "    -> WARP connected after $((i*2))s."
+        WARP_READY=1
         break
     fi
     printf "."
     sleep 2
 done
+echo ""
 
-# Extra 5s buffer for Tor to build its first circuit after port opens
-sleep 5
-echo "    -> Tor ready."
-echo "    -> $(wine --version)"
+if [ "$WARP_READY" -eq 0 ]; then
+    echo "    WARNING: WARP not confirmed connected. Checking exit IP..."
+fi
+
+# Show current exit IP (should be Cloudflare, not Tencent)
+EXIT_IP=$(curl -s --max-time 10 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "^ip=" | cut -d= -f2 || echo "unknown")
+echo "    -> Current exit IP: $EXIT_IP (via Cloudflare WARP)"
 
 # --- [3/8] SWAP ---
 echo "==> [3/8] Setting up Swap (persistent across reboots)..."
@@ -143,7 +157,8 @@ echo "    -> RAM cache cleared now. Auto-clear every 30 min via cron."
 
 # --- [5/8] MT5 SETUP DOWNLOAD (ONCE ONLY, REUSE ON RERUNS) ---
 # IMPORTANT: mt5setup.exe is a WEB INSTALLER (~300KB). It downloads MT5
-# components from MetaQuotes CDN at install time too — Tor covers both.
+# components from MetaQuotes CDN at install time too.
+# WARP changes the system exit IP so both download and install go through Cloudflare.
 echo "==> [5/8] Checking for mt5setup.exe..."
 
 SETUP_FILE="/opt/mt5setup.exe"
@@ -154,34 +169,34 @@ FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 if [ "$FILESIZE" -gt 1000000 ]; then
     echo "    -> Reusing cached mt5setup.exe ($(du -sh $SETUP_FILE | cut -f1)). Skipping download."
 else
-    echo "    -> Downloading via Tor (bypasses MetaQuotes CDN IP block)..."
-    echo "    -> (Tor is slower ~100-300KB/s — expect 30-60s for the installer)"
-    proxychains4 -q wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
-        proxychains4 -q curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
+    echo "    -> Downloading via Cloudflare WARP (full speed, no proxy overhead)..."
+    wget -q --show-progress "$MT5_CDN" -O "$SETUP_FILE" 2>&1 || \
+        curl -L --progress-bar "$MT5_CDN" -o "$SETUP_FILE" || true
 
     FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 
     if [ "$FILESIZE" -lt 1000000 ]; then
         echo ""
-        echo "ERROR: Tor download failed (${FILESIZE} bytes)."
+        echo "ERROR: Download failed (${FILESIZE} bytes) even with WARP."
         echo ""
-        echo "  Option A — Retry with a fresh Tor circuit:"
-        echo "  systemctl restart tor && sleep 15 && bash $0 $*"
+        echo "  Check WARP status:  warp-cli status"
+        echo "  Reconnect WARP:     warp-cli disconnect && warp-cli connect && sleep 10"
+        echo "  Then retry:         bash $0 $*"
         echo ""
-        echo "  Option B — Manual SCP from your LOCAL PC:"
+        echo "  OR manual SCP from your LOCAL PC:"
         echo "  curl -o mt5setup.exe '${MT5_CDN}'"
         echo "  scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):${SETUP_FILE}"
-        echo "  Then re-run — download will be skipped automatically."
         rm -f "$SETUP_FILE"
         exit 1
     fi
-    echo "    -> Downloaded via Tor: $(du -sh $SETUP_FILE | cut -f1)"
+    echo "    -> Downloaded: $(du -sh $SETUP_FILE | cut -f1)"
 fi
 
 # Symlink to /tmp for Wine install command
 ln -sf "$SETUP_FILE" /tmp/mt5setup.exe
 
-# --- [5b/8] WINE PREFIX INIT + MT5 INSTALL (VIA TOR) ---
+# --- [5b/8] WINE PREFIX INIT + MT5 INSTALL ---
+# WARP is still active — Wine installer CDN calls also go through Cloudflare
 echo "    -> Initializing Wine prefix..."
 export WINEPREFIX=/opt/mt5master
 export WINEARCH=win64
@@ -191,10 +206,8 @@ mkdir -p $WINEPREFIX
 xvfb-run -a wineboot -u >/dev/null 2>&1
 echo "    -> Wine prefix initialized."
 
-# mt5setup.exe pulls MT5 components from CDN at install time — must also go via Tor
-echo "    -> Running silent MT5 install via Tor (wait up to 5 minutes)..."
-echo "    -> (Install downloads ~22MB through Tor — may take 3-5 minutes)"
-proxychains4 -q xvfb-run -a wine /tmp/mt5setup.exe /auto &
+echo "    -> Running silent MT5 install (WARP active — wait up to 5 minutes)..."
+xvfb-run -a wine /tmp/mt5setup.exe /auto &
 INSTALL_PID=$!
 
 for i in {1..60}; do
@@ -216,8 +229,8 @@ sleep 3
 MT5_DIR=$(find $WINEPREFIX -name "metatester64.exe" -exec dirname {} \; 2>/dev/null | head -1)
 if [ -z "$MT5_DIR" ]; then
     echo "ERROR: MT5 installation failed. metatester64.exe not found."
-    echo "  Tor circuit may have dropped during install. Retry:"
-    echo "  systemctl restart tor && sleep 15 && bash $0 $*"
+    echo "  Check WARP: warp-cli status"
+    echo "  Retry:      bash $0 $*"
     exit 1
 fi
 echo "    -> Installed at: $MT5_DIR"
@@ -247,6 +260,9 @@ pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f wineserver 2>/dev/null || true
 sleep 5
 ulimit -n 100000
+# Ensure WARP is connected on reboot
+warp-cli connect >/dev/null 2>&1 || true
+sleep 3
 STARTEOF
 
 for P in $(seq $SP $EP); do
@@ -311,10 +327,10 @@ done
 
 chmod +x /opt/mt5/start-all.sh
 
-# @reboot — 45s delay ensures network + fstab mounts are ready before agents start
+# @reboot — 45s delay ensures WARP + network + fstab mounts are ready
 (crontab -l 2>/dev/null | grep -v mt5; \
-    echo "@reboot sleep 45 && /usr/local/bin/clear-ram-cache.sh && /opt/mt5/start-all.sh") | crontab -
-echo "    -> @reboot cron added (45s boot delay for network readiness)."
+    echo "@reboot sleep 45 && warp-cli connect && sleep 5 && /usr/local/bin/clear-ram-cache.sh && /opt/mt5/start-all.sh") | crontab -
+echo "    -> @reboot cron added (45s boot delay + WARP reconnect)."
 
 # --- [8/8] VERIFY ---
 echo "==> [8/8] Waiting for agents to come online (up to 5 minutes)..."
@@ -337,6 +353,9 @@ for i in {1..60}; do
         echo "============================================="
         [ ! -z "$MQL5_LOGIN" ] && echo "  Cloud: ENABLED for account '$MQL5_LOGIN'"
         echo ""
+        echo "  WARP Status:  warp-cli status"
+        echo "  Exit IP:      curl -s https://cloudflare.com/cdn-cgi/trace | grep ip="
+        echo ""
         echo "  Commands:"
         echo "    screen -ls                          (list all sessions)"
         echo "    screen -r mt5-3000                  (watch agent live)"
@@ -350,7 +369,7 @@ for i in {1..60}; do
         echo "    Also check: https://cloud.mql5.com"
         echo ""
         echo "  NOTE: /opt/mt5setup.exe is preserved."
-        echo "        Re-running this script skips the download automatically."
+        echo "        Re-running skips the download step automatically."
         echo "============================================="
         exit 0
     fi
