@@ -33,7 +33,7 @@ pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f wineserver 2>/dev/null || true
 pkill -9 -f Xvfb 2>/dev/null || true
 sleep 3
-rm -rf /opt/mt5* /tmp/mt5setup.exe 2>/dev/null || true
+rm -rf /opt/mt5* /tmp/mt5setup.exe /tmp/gdrive* 2>/dev/null || true
 apt-get remove --purge -y wine* winehq* 2>/dev/null || true
 apt-get autoremove -y >/dev/null 2>&1 || true
 crontab -l 2>/dev/null | grep -v mt5 | grep -v clear-ram | crontab - 2>/dev/null || true
@@ -49,7 +49,8 @@ UBUNTU_VER=$(lsb_release -cs)
 wget -q -NP /etc/apt/sources.list.d/ \
     "https://dl.winehq.org/wine-builds/ubuntu/dists/$UBUNTU_VER/winehq-$UBUNTU_VER.sources"
 apt-get update -y >/dev/null
-apt-get install -y --install-recommends winehq-devel xvfb screen wget net-tools cabextract python3-pip >/dev/null 2>&1
+apt-get install -y --install-recommends winehq-devel xvfb screen wget net-tools cabextract python3-pip curl >/dev/null 2>&1
+pip3 install -q --upgrade gdown
 echo "    -> $(wine --version)"
 
 # --- [3/8] SWAP 64GB PERSISTENT ---
@@ -94,42 +95,54 @@ mkdir -p $WINEPREFIX
 xvfb-run -a wineboot -u >/dev/null 2>&1
 echo "    -> Wine prefix initialized."
 
-# Install gdown for reliable Google Drive downloads
-pip3 install -q gdown
-
 GDRIVE_ID="1XMi5YbCtyeiJFlSbflJjbUFV-sIQI4TC"
 
-echo "    -> Downloading via gdown..."
-gdown --id "$GDRIVE_ID" -O /tmp/mt5setup.exe || true
+# Method 1: gdown (handles large file virus-scan bypass automatically)
+echo "    -> Trying gdown..."
+gdown --fuzzy "https://drive.google.com/file/d/${GDRIVE_ID}/view?usp=drive_link" \
+    -O /tmp/mt5setup.exe 2>/dev/null || true
 
-# Verify file is a real exe (must be > 1MB)
 FILESIZE=$(stat -c%s /tmp/mt5setup.exe 2>/dev/null || echo 0)
+
+# Method 2: curl with Google Drive export URL
 if [ "$FILESIZE" -lt 1000000 ]; then
-    echo "    -> gdown failed (${FILESIZE} bytes). Trying wget fallback..."
-    wget -q --show-progress \
-        --tries=3 --timeout=120 \
-        --save-cookies /tmp/gdrive_cookies.txt \
-        --keep-session-cookies \
-        "https://drive.google.com/uc?export=download&id=$GDRIVE_ID" \
-        -O /tmp/gdrive_confirm.html || true
-    CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/gdrive_confirm.html 2>/dev/null | head -1 | cut -d= -f2 || echo "t")
-    wget -q --show-progress \
-        --tries=3 --timeout=120 \
-        --load-cookies /tmp/gdrive_cookies.txt \
-        "https://drive.google.com/uc?export=download&id=$GDRIVE_ID&confirm=$CONFIRM" \
-        -O /tmp/mt5setup.exe || true
+    echo "    -> gdown failed (${FILESIZE} bytes). Trying curl..."
+    rm -f /tmp/mt5setup.exe /tmp/gdrive_cookies.txt
+    curl -c /tmp/gdrive_cookies.txt -s \
+        "https://drive.google.com/uc?export=download&id=${GDRIVE_ID}" \
+        -o /tmp/gdrive_page.html
+    CONFIRM=$(grep -oP 'confirm=\K[^&"]+' /tmp/gdrive_page.html 2>/dev/null | head -1 || echo "t")
+    curl -Lb /tmp/gdrive_cookies.txt \
+        "https://drive.google.com/uc?export=download&id=${GDRIVE_ID}&confirm=${CONFIRM}" \
+        -o /tmp/mt5setup.exe
     FILESIZE=$(stat -c%s /tmp/mt5setup.exe 2>/dev/null || echo 0)
 fi
 
+# Method 3: wget with cookie confirmation
 if [ "$FILESIZE" -lt 1000000 ]; then
-    echo "ERROR: mt5setup.exe download failed. File is only ${FILESIZE} bytes."
-    echo "  Manual fix: scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):/tmp/mt5setup.exe"
-    echo "  Then re-run this script — it will skip the download if /tmp/mt5setup.exe exists."
+    echo "    -> curl failed (${FILESIZE} bytes). Trying wget..."
+    rm -f /tmp/mt5setup.exe /tmp/gdrive_cookies.txt
+    wget -q --save-cookies /tmp/gdrive_cookies.txt --keep-session-cookies \
+        "https://drive.google.com/uc?export=download&id=${GDRIVE_ID}" \
+        -O /tmp/gdrive_page.html
+    CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/gdrive_page.html 2>/dev/null | head -1 | cut -d= -f2 || echo "t")
+    wget -q --show-progress --load-cookies /tmp/gdrive_cookies.txt \
+        "https://drive.google.com/uc?export=download&id=${GDRIVE_ID}&confirm=${CONFIRM}" \
+        -O /tmp/mt5setup.exe
+    FILESIZE=$(stat -c%s /tmp/mt5setup.exe 2>/dev/null || echo 0)
+fi
+
+# Final size check
+if [ "$FILESIZE" -lt 1000000 ]; then
+    echo "ERROR: All download methods failed. File is only ${FILESIZE} bytes."
+    echo ""
+    echo "  Manual fix — run this on your LOCAL PC then re-run this script:"
+    echo "  scp mt5setup.exe root@$(hostname -I | awk '{print $1}'):/tmp/mt5setup.exe"
     exit 1
 fi
 echo "    -> mt5setup.exe ready: $(du -sh /tmp/mt5setup.exe | cut -f1)"
 
-echo "    -> Running silent install..."
+echo "    -> Running silent MT5 install (wait up to 5 minutes)..."
 xvfb-run -a wine /tmp/mt5setup.exe /auto &
 INSTALL_PID=$!
 
