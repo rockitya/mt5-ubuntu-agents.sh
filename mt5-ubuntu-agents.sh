@@ -19,10 +19,9 @@ MQL5_LOGIN=$3
 export DEBIAN_FRONTEND=noninteractive
 
 echo "==> [1/7] NUCLEAR WIPE: Killing Locked Processes & Old Installs..."
-# THE FIX: Annihilate any stuck background windows/wine processes locking the system
-sudo killall -9 wine wineserver xvfb-run Xvfb metatester64.exe 2>/dev/null || true
+# Erase all traces of background locked files so we have a clean slate
+sudo killall -9 wine wineserver xvfb-run Xvfb metatester64.exe mt5setup.exe wget curl 2>/dev/null || true
 
-sudo systemctl stop docker 2>/dev/null || true
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
 
 sudo rm -rf /opt/mt5* /tmp/mt5* ~/.wine /root/.wine /etc/systemd/system/mt5-agent* >/dev/null 2>&1 || true
@@ -40,9 +39,6 @@ if ! swapon --show | grep -q "/swapfile"; then
     sudo chmod 600 /swapfile || true
     sudo mkswap /swapfile || true
     sudo swapon /swapfile || true
-    if ! grep -q "/swapfile none swap" /etc/fstab; then
-        echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null || true
-    fi
 fi
 
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
@@ -56,32 +52,40 @@ vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [4/7] Downloading & Installing Official MT5 Suite..."
+echo "==> [4/7] Downloading MetaTester directly from GitHub..."
 MASTER_WP="/opt/mt5master"
 sudo mkdir -p $MASTER_WP
 sudo chown -R $USER:$USER $MASTER_WP
 
 export WINEPREFIX=$MASTER_WP 
 export WINEARCH=win64 
-# THE FIX: Forcefully disable Mono/Gecko prompts so Wine doesn't freeze in the background
 export WINEDLLOVERRIDES="mscoree,mshtml=" 
 
-echo "    -> Initializing Windows Environment (This may take 1-2 minutes)..."
+echo "    -> Initializing Windows Environment (This takes ~15 seconds)..."
 xvfb-run -a wineboot -u >/dev/null 2>&1
 
-# THE FIX: Added '--show-progress' so you can see if the MetaQuotes CDN is slow
-echo "    -> Downloading MT5 Installer..."
-wget --show-progress -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
-
-echo "    -> Running MT5 Installer (Downloading base files from broker)..."
-xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
-
-echo "    -> Waiting 90 seconds for background extraction..."
-sleep 90
-
+echo "    -> Pulling metatester64.exe directly from your GitHub..."
+sudo mkdir -p "$MASTER_WP/drive_c/Program Files/MetaTrader 5/"
+sudo chown -R $USER:$USER "$MASTER_WP"
 MASTER_EX="$MASTER_WP/drive_c/Program Files/MetaTrader 5/metatester64.exe"
+
+# THE FIX: Bypassing MetaQuotes CDN and pulling your exact binary. 
+# Using the /raw/ path perfectly handles both standard and LFS Git binaries.
+wget --show-progress -q -O "$MASTER_EX" "https://github.com/rockitya/mt5-ubuntu-agents.sh/raw/main/metatester64.exe"
+chmod +x "$MASTER_EX"
+
+# Safety Check - Ensure it downloaded the full file and not a tiny text file error
+FILESIZE=$(stat -c%s "$MASTER_EX")
+if [ "$FILESIZE" -lt 1000000 ]; then
+    echo "WARNING: GitHub download was too small (Likely an LFS pointer block)."
+    echo "Fallback: Tricking MetaQuotes CDN with a custom User-Agent..."
+    wget --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" --show-progress -q -O /tmp/mt5setup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+    xvfb-run -a wine /tmp/mt5setup.exe /auto >/dev/null 2>&1 &
+    sleep 90
+fi
+
 if [ ! -f "$MASTER_EX" ]; then
-    echo "ERROR: metatester64.exe failed to extract. The MT5 web installer got stuck."
+    echo "ERROR: metatester64.exe is completely missing. Exiting."
     exit 1
 fi
 
@@ -99,7 +103,6 @@ for P in $(seq $SP $EP); do
     if [ ! -z "$MQL5_LOGIN" ]; then
         ACCOUNT_FLAG="/account:$MQL5_LOGIN"
         
-        # Inject Registry
         cat <<REG > "$AGENT_WP/cloud.reg"
 Windows Registry Editor Version 5.00
 [HKEY_CURRENT_USER\Software\MetaQuotes\MetaTester]
@@ -108,7 +111,6 @@ Windows Registry Editor Version 5.00
 REG
         WINEPREFIX="$AGENT_WP" WINEDLLOVERRIDES="mscoree,mshtml=" xvfb-run -a wine regedit "$AGENT_WP/cloud.reg" >/dev/null 2>&1
 
-        # Inject INI Configuration
         CONFIG_DIR="$AGENT_WP/drive_c/users/root/AppData/Roaming/MetaQuotes/Tester"
         sudo mkdir -p "$CONFIG_DIR"
         cat <<INI | sudo tee "$CONFIG_DIR/metatester.ini" >/dev/null
@@ -157,6 +159,5 @@ echo "========================================="
 if [ ! -z "$MQL5_LOGIN" ]; then
     echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
 fi
-echo "To check agent 3000 status: sudo systemctl status mt5-agent-3000"
-echo "To check agent logs: sudo journalctl -u mt5-agent-3000 -f"
+echo "To check agent 3000 logs: sudo journalctl -u mt5-agent-3000 -f"
 echo "========================================="
