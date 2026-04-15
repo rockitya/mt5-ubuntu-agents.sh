@@ -18,11 +18,9 @@ MQL5_LOGIN=$3
 export DEBIAN_FRONTEND=noninteractive
 
 echo "==> [1/9] NUCLEAR WIPE: Erasing all old installations and modules..."
-# Disable Firewall
 sudo ufw disable >/dev/null 2>&1 || true
 sudo iptables -F >/dev/null 2>&1 || true
 
-# Stop Auto-Updates to free dpkg
 sudo systemctl stop apt-daily.timer 2>/dev/null || true
 sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
 sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
@@ -31,14 +29,12 @@ while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/a
 done
 sudo dpkg --configure -a >/dev/null 2>&1 || true
 
-# Stop and wipe all existing Docker containers and images
 if command -v docker &> /dev/null; then
     sudo docker rm -f $(sudo docker ps -aq) >/dev/null 2>&1 || true
     sudo docker rmi -f mt5-cloud-agent >/dev/null 2>&1 || true
     sudo docker system prune -af --volumes >/dev/null 2>&1 || true
 fi
 
-# Erase all old SystemD services, Host Wine, and MT5 directories
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
 sudo apt-get remove --purge -y wine* xvfb winbind >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
@@ -80,12 +76,9 @@ sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 echo "==> [5/9] Downloading Custom Agent from GitHub..."
 mkdir -p /tmp/mt5-docker-build
 cd /tmp/mt5-docker-build
-
 wget -q -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
 echo "==> [6/9] Writing Container keep-alive script..."
-# THE FIX: This wrapper script prevents the container from shutting down 
-# when Wine pushes the agent into the background.
 cat << 'EOF' > Dockerfile
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -112,8 +105,9 @@ RUN echo '#!/bin/bash' > /mt5/run.sh && \
 ENTRYPOINT ["/mt5/run.sh"]
 EOF
 
-echo "==> [7/9] Building the Docker image..."
-sudo docker build -t mt5-cloud-agent . >/dev/null 2>&1
+echo "==> [7/9] Building the Docker image (Logs enabled to show progress)..."
+# THE FIX: Added '--network=host' back in so apt-get can connect to the internet!
+sudo docker build --network=host -t mt5-cloud-agent .
 cd ~
 
 echo "==> [8/9] Deploying Containerized Cloud Agents..."
