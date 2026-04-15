@@ -17,37 +17,36 @@ MQL5_LOGIN=$3
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "==> [1/9] NUCLEAR WIPE: Erasing all old installations and modules..."
-sudo ufw disable >/dev/null 2>&1 || true
-sudo iptables -F >/dev/null 2>&1 || true
-
-sudo systemctl stop apt-daily.timer 2>/dev/null || true
-sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
-sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
-while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
-    sleep 2
-done
-sudo dpkg --configure -a >/dev/null 2>&1 || true
-
+echo "==> [1/8] NUCLEAR WIPE: Uninstalling all old MetaTester instances..."
+# 1. Stop all Docker processes to free up files
 if command -v docker &> /dev/null; then
     sudo docker rm -f $(sudo docker ps -aq) >/dev/null 2>&1 || true
     sudo docker rmi -f mt5-cloud-agent >/dev/null 2>&1 || true
     sudo docker system prune -af --volumes >/dev/null 2>&1 || true
 fi
 
+# 2. Stop all lingering Linux background services
 for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
+
+# 3. Explicitly hunt down and kill any rogue metatester64.exe processes
+sudo killall -9 wineserver metatester64.exe wine xvfb-run >/dev/null 2>&1 || true
+
+# 4. Physically delete all MetaTrader installation folders and Wine prefixes across the system
+sudo rm -rf /opt/mt5* /tmp/mt5* ~/.wine /root/.wine /etc/systemd/system/mt5-agent* >/dev/null 2>&1 || true
+sudo rm -rf "/opt/mt5master" "/opt/mt5agent-"* "/root/mt5-agents" >/dev/null 2>&1 || true
+
+# 5. Uninstall Wine to guarantee a blank slate
 sudo apt-get remove --purge -y wine* xvfb winbind >/dev/null 2>&1 || true
 sudo apt-get autoremove -y >/dev/null 2>&1 || true
-sudo rm -rf /opt/mt5* /tmp/mt5* ~/.wine /root/.wine /etc/systemd/system/mt5-agent* >/dev/null 2>&1 || true
 
-echo "==> [2/9] Installing fresh Docker Engine..."
+echo "==> [2/8] Installing fresh Docker Engine..."
 if ! command -v docker &> /dev/null; then
     curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1
 fi
 sudo systemctl enable docker >/dev/null 2>&1 || true
 sudo systemctl start docker >/dev/null 2>&1 || true
 
-echo "==> [3/9] Creating 64GB Swap File (Max RAM Protection)..."
+echo "==> [3/8] Creating 64GB Swap File (Max RAM Protection)..."
 if swapon --show | grep -q "/swapfile"; then
     echo "    Swap active. Skipping."
 else
@@ -61,7 +60,7 @@ else
     fi
 fi
 
-echo "==> [4/9] Optimizing Host Network..."
+echo "==> [4/8] Optimizing Host Network..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
@@ -73,12 +72,15 @@ vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [5/9] Downloading Custom Agent from GitHub..."
+echo "==> [5/8] Downloading Custom Agent from GitHub..."
 mkdir -p /tmp/mt5-docker-build
 cd /tmp/mt5-docker-build
+
 wget -q -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
-echo "==> [6/9] Writing Container keep-alive script..."
+echo "==> [6/8] Writing Strict Foreground Container..."
+# THE FIX: Removed the buggy 'run.sh' bash loop. 
+# We now tell Docker to execute metatester64.exe directly as its main, blocking PID 1 process.
 cat << 'EOF' > Dockerfile
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -92,25 +94,16 @@ RUN dpkg --add-architecture i386 && \
 RUN mkdir -p /mt5
 COPY metatester64.exe /mt5/metatester64.exe
 RUN chmod +x /mt5/metatester64.exe
-RUN xvfb-run -a wineboot -u
 
-RUN echo '#!/bin/bash' > /mt5/run.sh && \
-    echo 'touch /mt5/agent.log' >> /mt5/run.sh && \
-    echo 'xvfb-run -a wine /mt5/metatester64.exe /config:Z:\\mt5\\config.ini > /mt5/agent.log 2>&1 &' >> /mt5/run.sh && \
-    echo 'echo "Agent running in background. Streaming logs..."' >> /mt5/run.sh && \
-    echo 'sleep 2' >> /mt5/run.sh && \
-    echo 'tail -f /mt5/agent.log' >> /mt5/run.sh && \
-    chmod +x /mt5/run.sh
-
-ENTRYPOINT ["/mt5/run.sh"]
+# Execute natively in the foreground so the container never exits
+ENTRYPOINT ["xvfb-run", "-a", "wine", "/mt5/metatester64.exe", "/config:Z:\\mt5\\config.ini"]
 EOF
 
-echo "==> [7/9] Building the Docker image (Logs enabled to show progress)..."
-# THE FIX: Added '--network=host' back in so apt-get can connect to the internet!
+echo "==> [7/8] Building the Docker image (Logs enabled)..."
 sudo docker build --network=host -t mt5-cloud-agent .
 cd ~
 
-echo "==> [8/9] Deploying Containerized Cloud Agents..."
+echo "==> [8/8] Deploying Containerized Cloud Agents..."
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
@@ -128,7 +121,7 @@ Login=$MQL5_LOGIN
 SellComputingResources=1
 INI
 
-    # Launch Docker mapped directly to the Host network
+    # Docker runs it safely in the background (-d), but INSIDE the container it runs in the foreground.
     sudo docker run -d \
         --name mt5-agent-$P \
         --net=host \
@@ -138,7 +131,6 @@ INI
         mt5-cloud-agent >/dev/null 2>&1
 done
 
-echo "==> [9/9] Finalizing..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 sleep 6
 
