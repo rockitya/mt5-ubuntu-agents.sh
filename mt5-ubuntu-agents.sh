@@ -17,36 +17,41 @@ MQL5_LOGIN=$3
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo "==> [1/8] Disabling Firewall & Stopping Auto-Updates..."
+echo "==> [1/9] NUCLEAR WIPE: Erasing all old installations and modules..."
+# Disable Firewall
 sudo ufw disable >/dev/null 2>&1 || true
 sudo iptables -F >/dev/null 2>&1 || true
 
+# Stop Auto-Updates to free dpkg
 sudo systemctl stop apt-daily.timer 2>/dev/null || true
 sudo systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
 sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
-
 while sudo fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/cache/apt/archives/lock >/dev/null 2>&1; do
-    echo "    Waiting for Ubuntu background updates to release the dpkg lock..."
-    sleep 5
+    sleep 2
 done
 sudo dpkg --configure -a >/dev/null 2>&1 || true
 
-echo "==> [2/8] Cleaning up old local Wine installations..."
-for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
-sudo apt-get remove --purge -y wine* xvfb >/dev/null 2>&1 || true
-sudo apt-get autoremove -y >/dev/null 2>&1 || true
-sudo rm -rf /opt/mt5agent-* /opt/mt5master /tmp/mt5-docker-build >/dev/null 2>&1 || true
+# Stop and wipe all existing Docker containers and images
+if command -v docker &> /dev/null; then
+    sudo docker rm -f $(sudo docker ps -aq) >/dev/null 2>&1 || true
+    sudo docker rmi -f mt5-cloud-agent >/dev/null 2>&1 || true
+    sudo docker system prune -af --volumes >/dev/null 2>&1 || true
+fi
 
-echo "==> [3/8] Installing Docker..."
+# Erase all old SystemD services, Host Wine, and MT5 directories
+for P in $(seq 3000 3100); do sudo systemctl stop mt5-agent-$P.service 2>/dev/null || true; sudo systemctl disable mt5-agent-$P.service 2>/dev/null || true; done
+sudo apt-get remove --purge -y wine* xvfb winbind >/dev/null 2>&1 || true
+sudo apt-get autoremove -y >/dev/null 2>&1 || true
+sudo rm -rf /opt/mt5* /tmp/mt5* ~/.wine /root/.wine /etc/systemd/system/mt5-agent* >/dev/null 2>&1 || true
+
+echo "==> [2/9] Installing fresh Docker Engine..."
 if ! command -v docker &> /dev/null; then
-    curl -fsSL https://get.docker.com | sudo sh
-else
-    echo "    Docker is already installed."
+    curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1
 fi
 sudo systemctl enable docker >/dev/null 2>&1 || true
 sudo systemctl start docker >/dev/null 2>&1 || true
 
-echo "==> [4/8] Creating 64GB Swap File (Max RAM Protection)..."
+echo "==> [3/9] Creating 64GB Swap File (Max RAM Protection)..."
 if swapon --show | grep -q "/swapfile"; then
     echo "    Swap active. Skipping."
 else
@@ -60,7 +65,7 @@ else
     fi
 fi
 
-echo "==> [5/8] Optimizing Host Network..."
+echo "==> [4/9] Optimizing Host Network..."
 cat <<EOF | sudo tee /etc/sysctl.d/99-mt5-network.conf >/dev/null
 net.ipv4.tcp_keepalive_time=60
 net.ipv4.tcp_keepalive_intvl=10
@@ -72,14 +77,15 @@ vm.swappiness=60
 EOF
 sudo sysctl -p /etc/sysctl.d/99-mt5-network.conf >/dev/null 2>&1 || true
 
-echo "==> [6/8] Downloading Custom Agent & Building Docker Image..."
+echo "==> [5/9] Downloading Custom Agent from GitHub..."
 mkdir -p /tmp/mt5-docker-build
 cd /tmp/mt5-docker-build
 
-# THE FIX: Download the EXE directly from your rockitya GitHub repo
-echo "    Downloading custom metatester64.exe from GitHub..."
 wget -q -O metatester64.exe "https://raw.githubusercontent.com/rockitya/mt5-ubuntu-agents.sh/main/metatester64.exe"
 
+echo "==> [6/9] Writing Container keep-alive script..."
+# THE FIX: This wrapper script prevents the container from shutting down 
+# when Wine pushes the agent into the background.
 cat << 'EOF' > Dockerfile
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -89,16 +95,28 @@ RUN dpkg --add-architecture i386 && \
     apt-get update -yqq && \
     apt-get install -yqq wine64 wine32 xvfb winbind net-tools && \
     rm -rf /var/lib/apt/lists/*
+
 RUN mkdir -p /mt5
 COPY metatester64.exe /mt5/metatester64.exe
-ENTRYPOINT ["xvfb-run", "-a", "wine", "/mt5/metatester64.exe", "/config:Z:\\mt5\\config.ini"]
+RUN chmod +x /mt5/metatester64.exe
+RUN xvfb-run -a wineboot -u
+
+RUN echo '#!/bin/bash' > /mt5/run.sh && \
+    echo 'touch /mt5/agent.log' >> /mt5/run.sh && \
+    echo 'xvfb-run -a wine /mt5/metatester64.exe /config:Z:\\mt5\\config.ini > /mt5/agent.log 2>&1 &' >> /mt5/run.sh && \
+    echo 'echo "Agent running in background. Streaming logs..."' >> /mt5/run.sh && \
+    echo 'sleep 2' >> /mt5/run.sh && \
+    echo 'tail -f /mt5/agent.log' >> /mt5/run.sh && \
+    chmod +x /mt5/run.sh
+
+ENTRYPOINT ["/mt5/run.sh"]
 EOF
 
-echo "    Building the Docker image..."
-sudo docker build -t mt5-cloud-agent .
+echo "==> [7/9] Building the Docker image..."
+sudo docker build -t mt5-cloud-agent . >/dev/null 2>&1
 cd ~
 
-echo "==> [7/8] Deploying Containerized Cloud Agents..."
+echo "==> [8/9] Deploying Containerized Cloud Agents..."
 SP=3000
 EP=$((SP + REQUESTED_CORES - 1))
 
@@ -116,8 +134,7 @@ Login=$MQL5_LOGIN
 SellComputingResources=1
 INI
 
-    sudo docker rm -f mt5-agent-$P >/dev/null 2>&1 || true
-    
+    # Launch Docker mapped directly to the Host network
     sudo docker run -d \
         --name mt5-agent-$P \
         --net=host \
@@ -127,13 +144,13 @@ INI
         mt5-cloud-agent >/dev/null 2>&1
 done
 
-echo "==> [8/8] Finalizing..."
+echo "==> [9/9] Finalizing..."
 sudo sync; sudo sysctl -w vm.drop_caches=3 > /dev/null 2>&1
 sleep 6
 
 echo ""
 echo "========================================="
-echo "✓ SUCCESS! Dockerized Agents are active!"
+echo "✓ SUCCESS! Dockerized Agents are ACTIVE AND RUNNING!"
 sudo docker ps --format "table {{.Names}}\t{{.Status}}"
 echo "========================================="
 echo "VPS IP  : $(hostname -I | awk '{print $1}')"
@@ -142,5 +159,5 @@ if [ ! -z "$MQL5_LOGIN" ]; then
     echo "Cloud Selling: ENABLED for account '$MQL5_LOGIN'"
 fi
 echo "========================================="
-echo "Wait 2 minutes, then view the exact cloud connection logs using:"
+echo "To watch the live cloud connection logs, type:"
 echo "sudo docker logs -f mt5-agent-3000"
