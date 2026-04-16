@@ -14,7 +14,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # - Open MetaTester in noVNC
 # - PATH-safe
 # - Galaxy-safe
-# - NO dpkg --configure -a
+# - NO dpkg recovery
 # - No iptables flush
 # - No broad Wine purge
 # ============================================================
