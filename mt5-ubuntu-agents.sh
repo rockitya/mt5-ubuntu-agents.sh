@@ -14,13 +14,11 @@ MT5_URL_DEFAULT="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/
 echo "============================================="
 echo " MetaTester + Intel SDE setup"
 echo " Server : $SERVER_IP"
-echo " noVNC  : https://$SERVER_IP:$NOVNC_PORT/vnc.html?autoconnect=1"
 echo "============================================="
 
-# ------------------------------------------------------------
-# [1/7] REMOVE OLD SETUP
-# ------------------------------------------------------------
-echo "==> [1/7] Removing old setup"
+log(){ echo "$1"; }
+
+log "==> [1/8] Remove old setup"
 pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f terminal64 2>/dev/null || true
 pkill -9 -f wineserver 2>/dev/null || true
@@ -32,20 +30,9 @@ pkill -9 -f openbox 2>/dev/null || true
 pkill -9 -f xterm 2>/dev/null || true
 screen -wipe 2>/dev/null || true
 rm -rf /opt/mt5 /root/.wine "$WORKDIR" /tmp/.X11-unix /tmp/.X*-lock 2>/dev/null || true
-apt-get remove --purge -y \
-  winehq-devel winehq-stable winehq-staging wine wine64 wine32 libwine fonts-wine \
-  x11vnc novnc python3-websockify openbox xterm x11-utils \
-  zram-tools cloudflare-warp 2>/dev/null || true
-apt-get autoremove -y >/dev/null 2>&1 || true
-apt-get autoclean -y >/dev/null 2>&1 || true
-rm -f /etc/apt/sources.list.d/winehq-*.sources /etc/apt/keyrings/winehq-archive.key /etc/sysctl.d/99-mt5.conf 2>/dev/null || true
 mkdir -p "$WORKDIR"
-echo "    -> done"
 
-# ------------------------------------------------------------
-# [2/7] DISABLE FIREWALL
-# ------------------------------------------------------------
-echo "==> [2/7] Disable firewall"
+log "==> [2/8] Disable firewall"
 ufw disable 2>/dev/null || true
 iptables -F 2>/dev/null || true
 iptables -X 2>/dev/null || true
@@ -61,67 +48,81 @@ ip6tables -P FORWARD ACCEPT 2>/dev/null || true
 ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
 systemctl stop firewalld 2>/dev/null || true
 systemctl disable firewalld 2>/dev/null || true
-echo "    -> done"
 
-# ------------------------------------------------------------
-# [3/7] INSTALL WINE + VNC + TOOLS
-# ------------------------------------------------------------
-echo "==> [3/7] Install Wine + VNC + tools"
-apt-get update -y >/dev/null
+log "==> [3/8] Install base VNC + tools first"
+pkill -9 -f apt-get 2>/dev/null || true
+pkill -9 -f apt 2>/dev/null || true
+pkill -9 -f dpkg 2>/dev/null || true
+sleep 2
+rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+dpkg --configure -a 2>/dev/null || true
+
+apt-get update -y
 apt-get install -y \
-  software-properties-common ca-certificates gnupg2 lsb-release \
-  wget curl openssl python3 python3-pip xvfb screen cabextract x11-utils \
+  ca-certificates gnupg2 lsb-release wget curl openssl \
+  python3 python3-pip xvfb screen cabextract x11-utils \
   x11vnc novnc python3-websockify openbox xterm net-tools util-linux procps \
-  tar xz-utils >/dev/null 2>&1
+  tar xz-utils software-properties-common
 
+log "    -> base tools installed"
+
+log "==> [4/8] Install Wine with fallback method"
 dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings
 UBUNTU_VER="$(lsb_release -cs)"
+
+rm -f /etc/apt/sources.list.d/winehq-*.sources 2>/dev/null || true
+rm -f /etc/apt/keyrings/winehq-archive.key 2>/dev/null || true
+
 wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
 wget -q -NP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_VER}/winehq-${UBUNTU_VER}.sources"
-apt-get update -y >/dev/null
-apt-get install -y --install-recommends winehq-devel >/dev/null 2>&1
-echo "    -> $(wine --version)"
+apt-get update -y || true
 
-# ------------------------------------------------------------
-# [4/7] DOWNLOAD MT5 TESTER SETUP + INTEL SDE PLACEHOLDER
-# ------------------------------------------------------------
-echo "==> [4/7] Download MetaTester setup"
+# Try official winehq-devel first
+if apt-get install -y --install-recommends winehq-devel; then
+  log "    -> winehq-devel installed"
+else
+  log "    -> winehq-devel failed, using distro fallback"
+  apt-get -f install -y || true
+  apt-get install -y wine64 wine32 libwine fonts-wine || {
+    log "ERROR: Both Wine methods failed"
+    exit 1
+  }
+fi
 
+wine --version || { log "ERROR: wine command not available"; exit 1; }
+log "    -> $(wine --version)"
+
+log "==> [5/8] Download MetaTester setup"
 wget -O "$SETUP_FILE" "$MT5_URL_DEFAULT" >/dev/null 2>&1 || curl -L -o "$SETUP_FILE" "$MT5_URL_DEFAULT" >/dev/null 2>&1 || true
 FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 if [ "$FILESIZE" -lt 1000000 ]; then
-  echo "ERROR: Could not download mt5 setup from official site"
+  log "ERROR: Could not download mt5 setup from official site"
   exit 1
 fi
-echo "    -> Saved to $SETUP_FILE"
+log "    -> saved to $SETUP_FILE"
 
 mkdir -p "$SDE_DIR_BASE"
 cat > "$WORKDIR/README-SDE.txt" <<EOF
 Download Intel SDE Windows package manually from:
 $SDE_URL_DEFAULT
 
-Look for a file like:
-  sde-external-*-win.tar.xz
+Look for:
+  sde-external-...-win.tar.xz
 
-Then upload it to this server, for example:
-  scp sde-external-*-win.tar.xz root@$SERVER_IP:/root/
+Upload it to server:
+  scp sde-external-...-win.tar.xz root@$SERVER_IP:/root/
 
-After upload, run:
+Extract it:
   cd /root
-  tar -xf sde-external-*-win.tar.xz
+  tar -xf sde-external-...-win.tar.xz
   mv sde-external-* $SDE_DIR_BASE
 
-Then inside noVNC terminal run:
-  wine $SDE_DIR_BASE/sde.exe -hsw -- $SETUP_FILE
+Then run:
+  /opt/mt5/run-sde-metatester.sh
 EOF
 
-echo "    -> Wrote SDE instructions to $WORKDIR/README-SDE.txt"
-
-# ------------------------------------------------------------
-# [5/7] START NOVNC DESKTOP
-# ------------------------------------------------------------
-echo "==> [5/7] Start noVNC desktop"
+log "==> [6/8] Start noVNC desktop"
 mkdir -p /opt/mt5
 VNC_CERT="/opt/mt5/novnc.pem"
 openssl req -x509 -nodes -newkey rsa:2048 -keyout "$VNC_CERT" -out "$VNC_CERT" -days 3650 -subj "/CN=$SERVER_IP" >/dev/null 2>&1
@@ -137,12 +138,8 @@ x11vnc -display :10 -rfbport "$VNC_PORT" -passwd "$VNC_PASS" -forever -shared -n
 sleep 2
 websockify -D --web=/usr/share/novnc/ --cert="$VNC_CERT" "$NOVNC_PORT" localhost:"$VNC_PORT" >/tmp/websockify.log 2>&1
 sleep 2
-echo "    -> noVNC ready"
 
-# ------------------------------------------------------------
-# [6/7] INIT WINE PREFIX + WRITE HELPER SCRIPTS
-# ------------------------------------------------------------
-echo "==> [6/7] Initialize Wine and write helpers"
+log "==> [7/8] Init Wine + helper"
 export WINEPREFIX=/root/.wine
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
@@ -155,16 +152,13 @@ cat > /opt/mt5/run-sde-metatester.sh <<EOF
 export WINEPREFIX=/root/.wine
 export WINEARCH=win64
 export WINEDEBUG=-all
-
 SDE_EXE="$SDE_DIR_BASE/sde.exe"
 SETUP_EXE="$SETUP_FILE"
-
 if [ ! -f "\$SDE_EXE" ]; then
   echo "ERROR: SDE not found at \$SDE_EXE"
   echo "Read: $WORKDIR/README-SDE.txt"
   exit 1
 fi
-
 DISPLAY=:10 wine "\$SDE_EXE" -hsw -- "\$SETUP_EXE" >/tmp/sde-metatester.log 2>&1 &
 echo "Started SDE + MetaTester setup"
 echo "Log: /tmp/sde-metatester.log"
@@ -180,45 +174,20 @@ free -h
 EOF
 chmod +x /usr/local/bin/clear-ram.sh
 
-# ------------------------------------------------------------
-# [7/7] FINAL INSTRUCTIONS
-# ------------------------------------------------------------
+log "==> [8/8] Done"
 cat <<DONE
 
-=====================================================
- SETUP COMPLETE
-=====================================================
+If it paused earlier, the likely cause was winehq-devel install hanging/failing.
+This version installs base packages first, then tries winehq-devel, and falls back to distro wine64/wine32. WineHQ packages can fail or hang on some Ubuntu releases due to repo/dependency issues. [web:391][web:395][web:398]
 
-Open in browser:
+Open noVNC:
   https://$SERVER_IP:$NOVNC_PORT/vnc.html?autoconnect=1
 Password:
   $VNC_PASS
 
-What is already done:
-- Firewall disabled
-- Wine installed
-- noVNC desktop started
-- MT5 tester setup downloaded to:
+MetaTester setup path:
   $SETUP_FILE
 
-Next steps:
-1. Download Intel SDE Windows package manually from:
-   $SDE_URL_DEFAULT
-2. Upload the file ending in: sde-external-...-win.tar.xz
-3. Extract it on the server:
-   cd /root
-   tar -xf sde-external-*-win.tar.xz
-   mv sde-external-* $SDE_DIR_BASE
-4. In the VNC terminal run:
-   /opt/mt5/run-sde-metatester.sh
-
-Equivalent direct command:
-   wine $SDE_DIR_BASE/sde.exe -hsw -- $SETUP_FILE
-
-SDE instructions file:
-  $WORKDIR/README-SDE.txt
-
-Clear RAM anytime:
-  /usr/local/bin/clear-ram.sh
-=====================================================
+After you upload and extract Intel SDE:
+  /opt/mt5/run-sde-metatester.sh
 DONE
