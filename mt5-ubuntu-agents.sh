@@ -65,12 +65,7 @@ rm -rf /root/.wine 2>/dev/null || true
 rm -f /tmp/.X*-lock 2>/dev/null || true
 rm -rf /tmp/.X11-unix 2>/dev/null || true
 
-apt-get remove --purge -y \\
-    winehq-devel winehq-stable winehq-staging \\
-    wine wine64 wine32 libwine fonts-wine \\
-    x11vnc novnc python3-websockify \\
-    zram-tools cloudflare-warp \\
-    2>/dev/null || true
+apt-get remove --purge -y winehq-* wine* x11vnc novnc python3-websockify zram-tools cloudflare-warp 2>/dev/null || true
 
 swapoff /swapfile 2>/dev/null || true
 swapoff -a 2>/dev/null || true
