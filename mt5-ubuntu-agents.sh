@@ -4,7 +4,7 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ============================================================
-# MT5 / MetaTester minimal setup - SAFE REMOTE VERSION
+# MT5 / MetaTester minimal setup
 # - No agents
 # - No WARP
 # - No ZRAM
@@ -12,8 +12,11 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # - Download mt5setup.exe once from Google Drive
 # - Install MetaTester
 # - Open MetaTester in noVNC
-# - Add SDE launcher helper
-# - Safe for SSH sessions: no iptables flush, no broad wine purge
+# - PATH-safe
+# - Galaxy-safe
+# - No dpkg/apt recovery
+# - No iptables flush
+# - No broad Wine purge
 # ============================================================
 
 NOVNC_PORT=6080
@@ -32,9 +35,9 @@ echo " noVNC  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
 echo "============================================="
 
 # ------------------------------------------------------------
-# [0/8] CLEAN OLD RUNTIME ONLY
+# [0/7] CLEAN OLD RUNTIME ONLY
 # ------------------------------------------------------------
-echo "==> [0/8] Cleaning old runtime only"
+echo "==> [0/7] Cleaning old runtime only"
 
 pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f terminal64 2>/dev/null || true
@@ -49,21 +52,15 @@ rm -rf /opt/mt5 2>/dev/null || true
 rm -rf /root/.wine 2>/dev/null || true
 rm -f /tmp/.X*-lock 2>/dev/null || true
 rm -rf /tmp/.X11-unix 2>/dev/null || true
-
-swapoff /swapfile 2>/dev/null || true
-swapoff -a 2>/dev/null || true
-sed -i '\|/swapfile none swap sw 0 0|d' /etc/fstab 2>/dev/null || true
-rm -f /swapfile 2>/dev/null || true
-
-rm -f /etc/sysctl.d/99-mt5.conf 2>/dev/null || true
 rm -f /opt/mt5/novnc.pem 2>/dev/null || true
+rm -f /etc/sysctl.d/99-mt5.conf 2>/dev/null || true
 
 echo "    -> Runtime cleanup done"
 
 # ------------------------------------------------------------
-# [1/8] DISABLE HIGH-LEVEL FIREWALL ONLY
+# [1/7] DISABLE HIGH-LEVEL FIREWALL ONLY
 # ------------------------------------------------------------
-echo "==> [1/8] Disable high-level firewall only"
+echo "==> [1/7] Disable high-level firewall only"
 
 ufw disable 2>/dev/null || true
 systemctl stop firewalld 2>/dev/null || true
@@ -72,28 +69,9 @@ systemctl disable firewalld 2>/dev/null || true
 echo "    -> ufw/firewalld disabled (iptables untouched)"
 
 # ------------------------------------------------------------
-# [2/8] CHECK / RECOVER DPKG STATE
+# [2/7] INSTALL WINE + VNC + TOOLS
 # ------------------------------------------------------------
-echo "==> [2/8] Check dpkg state"
-
-if [ -d /var/lib/dpkg/updates ] && [ -n "$(find /var/lib/dpkg/updates -type f 2>/dev/null | head -1)" ]; then
-    echo "    -> pending dpkg updates found, running dpkg --configure -a"
-    /usr/bin/dpkg --configure -a || true
-fi
-
-if ! apt-get update -y >/dev/null 2>&1; then
-    echo "    -> apt metadata check failed, trying package recovery"
-    /usr/bin/dpkg --configure -a || true
-    apt-get install -f -y || true
-    apt --fix-broken install -y || true
-fi
-
-echo "    -> dpkg check completed"
-
-# ------------------------------------------------------------
-# [3/8] INSTALL WINE + VNC + TOOLS
-# ------------------------------------------------------------
-echo "==> [3/8] Install Wine + VNC + tools"
+echo "==> [2/7] Install Wine + VNC + tools"
 
 apt-get update -y >/dev/null
 apt-get install -y \
@@ -124,9 +102,9 @@ apt-get install -y --install-recommends winehq-devel >/dev/null
 echo "    -> $(wine --version)"
 
 # ------------------------------------------------------------
-# [4/8] SETUP FIXED 64GB SWAP
+# [3/7] SETUP FIXED 64GB SWAP
 # ------------------------------------------------------------
-echo "==> [4/8] Setup fixed 64GB swap"
+echo "==> [3/7] Setup fixed 64GB swap"
 
 swapoff -a 2>/dev/null || true
 sed -i '\|/swapfile none swap sw 0 0|d' /etc/fstab 2>/dev/null || true
@@ -155,9 +133,9 @@ free -h | grep -E "Mem|Swap"
 swapon --show || true
 
 # ------------------------------------------------------------
-# [5/8] DOWNLOAD MT5SETUP.EXE ONCE FROM GOOGLE DRIVE
+# [4/7] DOWNLOAD MT5SETUP.EXE ONCE FROM GOOGLE DRIVE
 # ------------------------------------------------------------
-echo "==> [5/8] Download mt5setup.exe from Google Drive"
+echo "==> [4/7] Download mt5setup.exe from Google Drive"
 
 FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 
@@ -166,7 +144,7 @@ if [ "$FILESIZE" -gt 1000000 ]; then
 else
     echo "    -> Installing gdown"
     python3 -m pip install --upgrade pip >/dev/null 2>&1 || true
-    python3 -m pip install gdown >/dev/null 2>&1
+    python3 -m pip install gdown >/dev/null 2>&1 || true
 
     rm -f "$SETUP_FILE" 2>/dev/null || true
 
@@ -186,9 +164,9 @@ else
 fi
 
 # ------------------------------------------------------------
-# [6/8] INSTALL METATRADER / METATESTER
+# [5/7] INSTALL METATRADER / METATESTER
 # ------------------------------------------------------------
-echo "==> [6/8] Install MetaTester"
+echo "==> [5/7] Install MetaTester"
 
 mkdir -p /opt/mt5
 
@@ -245,9 +223,9 @@ fi
 [ -n "$MT5_EX" ] && echo "    -> terminal64.exe found"
 
 # ------------------------------------------------------------
-# [7/8] OPEN IN NOVNC
+# [6/7] OPEN IN NOVNC
 # ------------------------------------------------------------
-echo "==> [7/8] Open MetaTester in noVNC"
+echo "==> [6/7] Open MetaTester in noVNC"
 
 mkdir -p /opt/mt5
 VNC_CERT="/opt/mt5/novnc.pem"
@@ -306,9 +284,9 @@ chmod +x /opt/mt5/open-vnc.sh
 /opt/mt5/open-vnc.sh
 
 # ------------------------------------------------------------
-# [8/8] CLEAN RAM + SDE LAUNCHER
+# [7/7] CLEAN RAM + SDE LAUNCHER
 # ------------------------------------------------------------
-echo "==> [8/8] Clean RAM + SDE launcher"
+echo "==> [7/7] Clean RAM + SDE launcher"
 
 cat > /usr/local/bin/clear-ram-cache.sh <<'EOF'
 #!/bin/bash
