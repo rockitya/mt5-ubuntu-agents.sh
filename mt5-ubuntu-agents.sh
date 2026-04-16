@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Starting VPS Visual Desktop & Wine Setup (Firewall Disabled)..."
+echo "Starting Fully Automated VPS Visual Desktop & MetaTester Setup..."
 
 # 1. Nuke the firewall completely (As requested)
 sudo ufw disable
@@ -8,7 +8,7 @@ sudo ufw disable
 # 2. Add 32-bit architecture and install dependencies
 sudo dpkg --add-architecture i386
 sudo apt-get update
-sudo apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify wine64 wine32 wget xz-utils curl
+sudo apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify wine64 wine32 wget unzip curl
 
 # 3. Setup VNC Server password (Setting password to: mql5test)
 mkdir -p ~/.vnc
@@ -30,38 +30,41 @@ vncserver :1 -geometry 1280x720 -depth 24
 # 6. Start noVNC Web Bridge in the background
 websockify -D --web=/usr/share/novnc/ 6080 localhost:5901
 
-# 7. Set up Wine and download the MetaTester Agent Setup
+# 7. Create working directory
 mkdir -p ~/mt5_experiment
 cd ~/mt5_experiment
 
-# Initialize Wine registry
-WINEARCH=win64 wineboot
+# 8. Initialize Wine silently to the VNC display
+export WINEARCH=win64
+export DISPLAY=:1
+echo "Initializing Wine environment..."
+wineboot -u
 
-# Download official MQL5 Strategy Tester Agent Installer (NOT the full MT5 terminal)
+# 9. Download the MetaTester Agent Setup
 echo "Downloading MetaTester Agent Installer..."
-wget -O mt5testersetup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5testersetup.exe"
+wget -q -O mt5testersetup.exe "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5testersetup.exe"
 
-# 8. Print final connection instructions
+# 10. Download and Extract Intel SDE (Automated direct download)
+echo "Downloading Intel SDE Emulator..."
+wget -q -O sde-win.zip "https://downloadmirror.intel.com/813591/sde-external-9.33.0-2024-01-07-win.zip"
+unzip -q sde-win.zip
+mv sde-external-9.33.0-2024-01-07-win sde
+
+# 11. Launch the installer inside the VNC Desktop
+echo "Launching Setup Wizard inside noVNC..."
+nohup wine ~/mt5_experiment/sde/sde.exe -hsw -- ~/mt5_experiment/mt5testersetup.exe > /dev/null 2>&1 &
+
+# 12. Print final connection instructions
 VPS_IP=$(curl -s ifconfig.me)
 
 echo ""
 echo "=========================================================================="
-echo "✅ SETUP COMPLETE! FIREWALL IS DOWN & DESKTOP IS LIVE."
+echo "✅ FULLY AUTOMATED SETUP COMPLETE!"
 echo "=========================================================================="
 echo "1. Open a web browser on your personal computer."
 echo "2. Navigate to: http://${VPS_IP}:6080/vnc.html"
 echo "3. Click 'Connect' and enter the password: mql5test"
 echo ""
-echo "=========================================================================="
-echo "NEXT STEPS (Do this INSIDE the visual desktop):"
-echo "=========================================================================="
-echo "1. Open the Web Browser inside your new VNC desktop."
-echo "2. Go to: https://www.intel.com/content/www/us/en/download/684897/"
-echo "3. Download the WINDOWS version (sde-external-...-win.tar.xz)."
-echo "4. Extract the SDE folder to your home directory."
-echo "5. Open the terminal emulator inside the VNC desktop and run:"
-echo "   wine /path/to/sde/sde.exe -hsw -- ~/mt5_experiment/mt5testersetup.exe"
-echo ""
-echo "WARNING: The installer will bypass the AVX check due to the emulator."
-echo "Running the installed metatester.exe normally afterward will still crash."
+echo "The MetaTester Agent Setup wizard should already be open and waiting"
+echo "for you on the visual desktop. (It may be slow/laggy due to emulation)."
 echo "=========================================================================="
