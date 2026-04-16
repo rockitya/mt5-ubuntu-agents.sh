@@ -4,7 +4,7 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ============================================================
-# MT5 / MetaTester minimal setup
+# MT5 / MetaTester minimal setup - SAFE REMOTE VERSION
 # - No agents
 # - No WARP
 # - No ZRAM
@@ -13,7 +13,7 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # - Install MetaTester
 # - Open MetaTester in noVNC
 # - Add SDE launcher helper
-# - PATH-safe for dpkg/apt in non-interactive shells
+# - Safe for SSH sessions: no iptables flush, no broad wine purge
 # ============================================================
 
 NOVNC_PORT=6080
@@ -32,9 +32,9 @@ echo " noVNC  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
 echo "============================================="
 
 # ------------------------------------------------------------
-# [0/8] REMOVE OLD SETUP
+# [0/8] CLEAN OLD RUNTIME ONLY
 # ------------------------------------------------------------
-echo "==> [0/8] Removing old setup"
+echo "==> [0/8] Cleaning old runtime only"
 
 pkill -9 -f metatester64 2>/dev/null || true
 pkill -9 -f terminal64 2>/dev/null || true
@@ -50,55 +50,31 @@ rm -rf /root/.wine 2>/dev/null || true
 rm -f /tmp/.X*-lock 2>/dev/null || true
 rm -rf /tmp/.X11-unix 2>/dev/null || true
 
-apt-get remove --purge -y winehq-* wine* x11vnc novnc python3-websockify zram-tools cloudflare-warp 2>/dev/null || true
-
 swapoff /swapfile 2>/dev/null || true
 swapoff -a 2>/dev/null || true
 sed -i '\|/swapfile none swap sw 0 0|d' /etc/fstab 2>/dev/null || true
 rm -f /swapfile 2>/dev/null || true
 
-rm -f /etc/apt/sources.list.d/winehq-*.sources 2>/dev/null || true
-rm -f /etc/apt/keyrings/winehq-archive.key 2>/dev/null || true
 rm -f /etc/sysctl.d/99-mt5.conf 2>/dev/null || true
-rm -f /etc/default/zramswap 2>/dev/null || true
 rm -f /opt/mt5/novnc.pem 2>/dev/null || true
 
-apt-get autoremove -y >/dev/null 2>&1 || true
-apt-get autoclean -y >/dev/null 2>&1 || true
-
-echo "    -> Old setup removed"
+echo "    -> Runtime cleanup done"
 
 # ------------------------------------------------------------
-# [1/8] DISABLE FIREWALL
+# [1/8] DISABLE HIGH-LEVEL FIREWALL ONLY
 # ------------------------------------------------------------
-echo "==> [1/8] Disable firewall"
+echo "==> [1/8] Disable high-level firewall only"
 
 ufw disable 2>/dev/null || true
-iptables -F 2>/dev/null || true
-iptables -X 2>/dev/null || true
-iptables -t nat -F 2>/dev/null || true
-iptables -t mangle -F 2>/dev/null || true
-iptables -P INPUT ACCEPT 2>/dev/null || true
-iptables -P FORWARD ACCEPT 2>/dev/null || true
-iptables -P OUTPUT ACCEPT 2>/dev/null || true
-
-ip6tables -F 2>/dev/null || true
-ip6tables -X 2>/dev/null || true
-ip6tables -P INPUT ACCEPT 2>/dev/null || true
-ip6tables -P FORWARD ACCEPT 2>/dev/null || true
-ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
-
 systemctl stop firewalld 2>/dev/null || true
 systemctl disable firewalld 2>/dev/null || true
 
-echo "    -> Firewall disabled"
+echo "    -> ufw/firewalld disabled (iptables untouched)"
 
 # ------------------------------------------------------------
 # [2/8] CHECK / RECOVER DPKG STATE
 # ------------------------------------------------------------
 echo "==> [2/8] Check dpkg state"
-
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 if [ -d /var/lib/dpkg/updates ] && [ -n "$(find /var/lib/dpkg/updates -type f 2>/dev/null | head -1)" ]; then
     echo "    -> pending dpkg updates found, running dpkg --configure -a"
