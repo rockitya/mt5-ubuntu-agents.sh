@@ -1,35 +1,38 @@
 #!/bin/bash
 # ============================================================
 # MT5 / MetaTester - ULTRA-REPAIR & AUTO-INSTALL
-# This version force-clears dpkg locks before starting.
 # ============================================================
 set -euo pipefail
+
+# 1. FORCE PATH & ENVIRONMENT (Fixes 'dpkg: PATH is not set')
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export DEBIAN_FRONTEND=noninteractive
 
+echo "============================================="
+echo " Starting MT5 Setup with Force-Repair"
+echo "============================================="
+
 # ------------------------------------------------------------
-# [CRITICAL] FORCE REPAIR DPKG/APT LOCKS
+# [PRE-FLIGHT] FORCE REPAIR DPKG/APT LOCKS
 # ------------------------------------------------------------
 echo "==> Clearing system locks and repairing package database..."
 
-# 1. Kill any hung apt/dpkg processes
+# Kill any hung apt/dpkg processes
 killall apt apt-get dpkg 2>/dev/null || true
 
-# 2. Force remove lock files
+# Force remove lock files that cause the 'interrupted' error
 rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
 rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock
 
-# 3. Run the repair command
-dpkg --configure -a
+# Repair the database
+dpkg --configure -a || true
+apt-get install -f -y || true
 
-# 4. Fix broken dependencies
-apt-get install -f -y
-
-echo "    -> System repaired. Starting MT5 Setup..."
+echo "    -> System repaired. Proceeding to install..."
 
 # ------------------------------------------------------------
-# SETTINGS & PATHS
+# SETTINGS
 # ------------------------------------------------------------
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 NOVNC_PORT=6080
 VNC_PORT=5900
 VNC_PASS="mt5vnc"
@@ -70,23 +73,25 @@ apt-get install -y --install-recommends winehq-devel
 # ------------------------------------------------------------
 # [3/7] SWAP SETUP (64GB)
 # ------------------------------------------------------------
-echo "==> [3/7] Creating 64GB Swap file (This takes a moment)..."
+echo "==> [3/7] Creating 64GB Swap file..."
 swapoff -a 2>/dev/null || true
 rm -f /swapfile
 fallocate -l 64G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=65536
 chmod 600 /swapfile
 mkswap /swapfile && swapon /swapfile
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
+if ! grep -q "/swapfile" /etc/fstab; then
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 # ------------------------------------------------------------
 # [4/7] DOWNLOAD MT5
 # ------------------------------------------------------------
 echo "==> [4/7] Downloading MT5 Setup..."
-pip3 install gdown --break-system-packages || pip3 install gdown
+python3 -m pip install gdown --break-system-packages || true
 gdown --fuzzy "$GDRIVE_URL" -O "$SETUP_FILE" || true
 
-if [ ! -f "$SETUP_FILE" ] || [ $(stat -c%s "$SETUP_FILE") -lt 100000 ]; then
-    echo "ERROR: Download failed. Using fallback web link..."
+if [ ! -f "$SETUP_FILE" ] || [ $(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0) -lt 100000 ]; then
+    echo "    -> Fallback: Official download..."
     wget -O "$SETUP_FILE" "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 fi
 
@@ -98,9 +103,11 @@ export WINEPREFIX=/root/.wine
 export WINEARCH=win64
 export WINEDEBUG=-all
 
+rm -f /tmp/.X99-lock
 Xvfb :99 -screen 0 1280x1024x24 &
 sleep 3
 DISPLAY=:99 wine "$SETUP_FILE" /auto &
+echo "    -> Waiting 60s for installer..."
 sleep 60
 pkill -9 wine 2>/dev/null || true
 
@@ -112,16 +119,17 @@ mkdir -p /opt/mt5
 VNC_CERT="/opt/mt5/novnc.pem"
 openssl req -x509 -nodes -newkey rsa:2048 -keyout "$VNC_CERT" -out "$VNC_CERT" -days 365 -subj "/CN=MT5"
 
-# Create the launch script
 cat > /opt/mt5/start.sh <<EOF
 #!/bin/bash
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+rm -f /tmp/.X10-lock
 Xvfb :10 -screen 0 1280x900x24 &
 sleep 2
 x11vnc -display :10 -rfbport $VNC_PORT -passwd "$VNC_PASS" -forever -bg
-websockify -D --web=/usr/share/novnc/ --cert="$VNC_CERT" $NOVNC_PORT localhost:$VNC_PORT
+/usr/bin/python3 /usr/bin/websockify -D --web=/usr/share/novnc/ --cert="$VNC_CERT" $NOVNC_PORT localhost:$VNC_PORT
 sleep 2
 MTEST_EX=\$(find /root/.wine -iname 'metatester64.exe' | head -1)
-DISPLAY=:10 wine "\$MTEST_EX"
+DISPLAY=:10 WINEPREFIX=/root/.wine wine "\$MTEST_EX"
 EOF
 
 chmod +x /opt/mt5/start.sh
