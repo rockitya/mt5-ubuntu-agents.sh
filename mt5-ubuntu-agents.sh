@@ -16,34 +16,30 @@ echo " $SERVER_IP"
 echo "============================================="
 
 # ===========================================================
-# [1] UNINSTALL ALL PREVIOUS METATESTER + MODULES
+# [1] UNINSTALL ALL
 # ===========================================================
 echo ""
-echo "==> [1/6] Uninstall all previous MetaTester + modules"
+echo "==> [1/6] Uninstall all previous setup"
 
-# Kill everything
-pkill -9 -f metatester64  2>/dev/null; pkill -9 -f terminal64  2>/dev/null
-pkill -9 -f wineserver    2>/dev/null; pkill -9 -f wine        2>/dev/null
-pkill -9 -f Xvfb          2>/dev/null; pkill -9 -f x11vnc      2>/dev/null
-pkill -9 -f websockify    2>/dev/null; pkill -9 -f openbox     2>/dev/null
-pkill -9 -f xterm         2>/dev/null
+pkill -9 -f metatester64 2>/dev/null; pkill -9 -f terminal64  2>/dev/null
+pkill -9 -f wineserver   2>/dev/null; pkill -9 -f wine        2>/dev/null
+pkill -9 -f Xvfb         2>/dev/null; pkill -9 -f x11vnc      2>/dev/null
+pkill -9 -f websockify   2>/dev/null; pkill -9 -f openbox     2>/dev/null
+pkill -9 -f xterm        2>/dev/null
 screen -wipe 2>/dev/null; sleep 2
 
-# Remove all MT5 / Wine directories
-rm -rf /opt/mt5 /opt/mt5master /opt/mt5agent-* 2>/dev/null
-rm -rf /root/.wine /root/.local/share/applications 2>/dev/null
+rm -rf /opt/mt5 /root/.wine 2>/dev/null
 rm -f /tmp/.X*-lock 2>/dev/null; rm -rf /tmp/.X11-unix 2>/dev/null
 
-# Clear apt locks first
+# Clear apt locks
 pkill -9 -f apt-get 2>/dev/null; pkill -9 -f dpkg 2>/dev/null; sleep 2
 rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
       /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null
 dpkg --configure -a 2>/dev/null
 
-# Purge Wine + VNC + extras
 apt-get remove --purge -y \
     winehq-devel winehq-stable winehq-staging \
-    wine wine64 wine32 wine-stable wine-devel wine-staging \
+    wine wine64 wine32 wine-stable wine-devel \
     libwine fonts-wine \
     x11vnc novnc python3-websockify \
     openbox xterm x11-utils \
@@ -52,45 +48,69 @@ apt-get remove --purge -y \
 apt-get autoremove -y >/dev/null 2>&1
 apt-get autoclean  -y >/dev/null 2>&1
 
-# Remove repo/key files
 rm -f /etc/apt/sources.list.d/winehq-*.sources 2>/dev/null
-rm -f /etc/apt/sources.list.d/cloudflare-*.list 2>/dev/null
 rm -f /etc/apt/keyrings/winehq-archive.key 2>/dev/null
-rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null
-rm -f /etc/sysctl.d/99-mt5.conf /etc/default/zramswap 2>/dev/null
+rm -f /etc/sysctl.d/99-mt5.conf 2>/dev/null
 (crontab -l 2>/dev/null | grep -v 'mt5\|clear-ram' || true) | crontab - 2>/dev/null
-
 echo "    -> done"
 
 # ===========================================================
-# [2] ADD 64GB SWAP
+# [2] SWAP — check disk space, use dd (reliable on all FS)
 # ===========================================================
 echo ""
-echo "==> [2/6] Add 64GB swap"
+echo "==> [2/6] Setup swap"
 
 swapoff -a 2>/dev/null
 sed -i '\|/swapfile|d' /etc/fstab 2>/dev/null
 rm -f /swapfile 2>/dev/null
 
-if fallocate -l 64G /swapfile 2>/dev/null; then
-    echo "    -> fallocate ok"
+# Check available disk space in GB
+AVAIL_GB=$(df -BG / 2>/dev/null | awk 'NR==2{gsub("G","",$4); print $4+0}')
+echo "    -> Disk available: ${AVAIL_GB}GB"
+
+if   [ "$AVAIL_GB" -ge 68 ]; then SWAP_GB=64
+elif [ "$AVAIL_GB" -ge 36 ]; then SWAP_GB=32
+elif [ "$AVAIL_GB" -ge 20 ]; then SWAP_GB=16
+elif [ "$AVAIL_GB" -ge 12 ]; then SWAP_GB=8
 else
-    dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress
+    echo "    WARNING: Only ${AVAIL_GB}GB free — skipping swap"
+    SWAP_GB=0
 fi
 
-chmod 600 /swapfile
-mkswap  /swapfile >/dev/null
-swapon  /swapfile
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
+if [ "$SWAP_GB" -gt 0 ]; then
+    echo "    -> Creating ${SWAP_GB}GB swapfile using dd (reliable on all filesystems)..."
+    SWAP_MB=$((SWAP_GB * 1024))
+    dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=progress 2>&1
+
+    if [ $? -ne 0 ]; then
+        echo "    ERROR: dd failed — trying smaller 4GB swap"
+        rm -f /swapfile 2>/dev/null
+        dd if=/dev/zero of=/swapfile bs=1M count=4096 status=none
+    fi
+
+    chmod 600 /swapfile
+    mkswap /swapfile
+
+    if swapon /swapfile; then
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        echo "    -> Swap ACTIVE"
+    else
+        echo "    ERROR: swapon failed — check filesystem type"
+        rm -f /swapfile
+    fi
+fi
 
 cat > /etc/sysctl.d/99-mt5.conf <<'EOF'
-vm.swappiness=10
+vm.swappiness=60
 vm.vfs_cache_pressure=80
 EOF
 sysctl -p /etc/sysctl.d/99-mt5.conf >/dev/null 2>&1
 
-free -h | grep -E "Mem|Swap"
-swapon --show
+echo ""
+echo "    --- Memory status ---"
+free -h
+echo ""
+swapon --show 2>/dev/null || echo "    (no swap active)"
 echo "    -> done"
 
 # ===========================================================
@@ -101,17 +121,16 @@ echo "==> [3/6] Disable firewall"
 
 ufw disable 2>/dev/null
 iptables  -F 2>/dev/null; iptables  -X 2>/dev/null
-iptables  -t nat    -F 2>/dev/null; iptables  -t mangle -F 2>/dev/null
-iptables  -P INPUT   ACCEPT 2>/dev/null
+iptables  -t nat -F 2>/dev/null; iptables -t mangle -F 2>/dev/null
+iptables  -P INPUT ACCEPT 2>/dev/null
 iptables  -P FORWARD ACCEPT 2>/dev/null
-iptables  -P OUTPUT  ACCEPT 2>/dev/null
+iptables  -P OUTPUT ACCEPT 2>/dev/null
 ip6tables -F 2>/dev/null; ip6tables -X 2>/dev/null
-ip6tables -P INPUT   ACCEPT 2>/dev/null
+ip6tables -P INPUT ACCEPT 2>/dev/null
 ip6tables -P FORWARD ACCEPT 2>/dev/null
-ip6tables -P OUTPUT  ACCEPT 2>/dev/null
-systemctl stop    firewalld 2>/dev/null
+ip6tables -P OUTPUT ACCEPT 2>/dev/null
+systemctl stop firewalld 2>/dev/null
 systemctl disable firewalld 2>/dev/null
-
 echo "    -> done"
 
 # ===========================================================
@@ -145,7 +164,6 @@ echo "    -> $(wine --version)"
 
 # --- Download mt5setup.exe ---
 FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
-
 if [ "$FILESIZE" -gt 1000000 ]; then
     echo "    -> Reusing cached mt5setup.exe ($(du -sh "$SETUP_FILE" | cut -f1))"
 else
@@ -157,14 +175,14 @@ else
     FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
 
     if [ "$FILESIZE" -lt 1000000 ]; then
-        echo "    -> Official CDN blocked, trying curl..."
-        curl -L --max-time 30 --retry 2 --silent "$OFFICIAL_URL" -o "$SETUP_FILE" 2>/dev/null || true
+        echo "    -> CDN blocked, trying curl..."
+        curl -L --max-time 30 --retry 2 -s "$OFFICIAL_URL" -o "$SETUP_FILE" 2>/dev/null || true
         FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
     fi
 
     # Try 2: Google Drive fallback
     if [ "$FILESIZE" -lt 1000000 ]; then
-        echo "    -> Official CDN failed, falling back to Google Drive..."
+        echo "    -> Falling back to Google Drive..."
         python3 -m pip install -q --upgrade pip 2>/dev/null
         python3 -m pip install -q gdown 2>/dev/null
         rm -f "$SETUP_FILE" 2>/dev/null
@@ -174,25 +192,22 @@ else
         FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
     fi
 
-    # Both failed
     if [ "$FILESIZE" -lt 1000000 ]; then
         echo ""
-        echo "ERROR: Download failed from both sources (${FILESIZE} bytes)"
-        echo ""
+        echo "ERROR: Download failed from all sources (${FILESIZE} bytes)"
         echo "Upload manually from your local PC:"
         echo "  scp mt5setup.exe root@$SERVER_IP:/root/mt5setup.exe"
         echo "Then re-run this script."
         exit 1
     fi
-
     echo "    -> Downloaded: $(du -sh "$SETUP_FILE" | cut -f1)"
 fi
 
 # ===========================================================
-# [5] OPEN METATESTER IN NOVNC
+# [5] START NOVNC DESKTOP + INSTALL + OPEN METATESTER
 # ===========================================================
 echo ""
-echo "==> [5/6] Open MetaTester in noVNC"
+echo "==> [5/6] Start VNC desktop + launch installer"
 
 mkdir -p /opt/mt5
 VNC_CERT="/opt/mt5/novnc.pem"
@@ -201,30 +216,30 @@ openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout "$VNC_CERT" -out "$VNC_CERT" -days 3650 \
     -subj "/CN=$SERVER_IP" >/dev/null 2>&1
 
-# Kill leftovers
-pkill -9 -f x11vnc    2>/dev/null; pkill -9 -f websockify 2>/dev/null
-pkill -9 -f openbox   2>/dev/null; pkill -9 -f Xvfb       2>/dev/null
+# Kill all old display processes
+pkill -9 -f x11vnc    2>/dev/null; pkill -9 -f websockify  2>/dev/null
+pkill -9 -f openbox   2>/dev/null; pkill -9 -f Xvfb        2>/dev/null
+pkill -9 -f xterm     2>/dev/null
 sleep 2
 rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null
 
-# Start virtual display
+# Start display
 Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb.log 2>&1 &
 sleep 4
 
-# Dark background so desktop is visible
+# Dark desktop background
 DISPLAY=:10 xsetroot -solid '#1a1f2e'
 
-# Start openbox window manager
+# Start openbox
 DISPLAY=:10 openbox &
 sleep 3
 
-# Open xterm so there is always something to interact with
+# Open xterm on the desktop (always visible)
 DISPLAY=:10 xterm \
     -geometry 110x35+20+20 \
     -bg '#0d1117' -fg '#00ff88' \
     -fa 'Monospace' -fs 11 \
-    -title "MT5 Shell" \
-    &
+    -title "MT5 Shell" &
 sleep 2
 
 # Start x11vnc
@@ -245,128 +260,177 @@ websockify -D \
     >/tmp/websockify.log 2>&1
 sleep 2
 
-# Verify ports are open
-VNC_UP=$(ss -tuln 2>/dev/null | grep -c ":${VNC_PORT} " || echo 0)
+# Verify ports
+VNC_UP=$(ss   -tuln 2>/dev/null | grep -c ":${VNC_PORT} "   || echo 0)
 NOVNC_UP=$(ss -tuln 2>/dev/null | grep -c ":${NOVNC_PORT} " || echo 0)
-echo "    -> VNC  port $VNC_PORT  : $([ "$VNC_UP"   -gt 0 ] && echo UP || echo FAILED)"
-echo "    -> noVNC port $NOVNC_PORT : $([ "$NOVNC_UP" -gt 0 ] && echo UP || echo FAILED)"
+echo "    -> VNC  :$VNC_PORT   $([ "$VNC_UP"   -gt 0 ] && echo UP || echo FAILED)"
+echo "    -> noVNC :$NOVNC_PORT $([ "$NOVNC_UP" -gt 0 ] && echo UP || echo FAILED)"
 
-# Init Wine prefix
+# Init Wine
 export WINEPREFIX=/root/.wine
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
 export WINEDEBUG=-all
 
-echo "    -> Initialising Wine prefix..."
+echo "    -> Init Wine prefix (wait ~15s)..."
 DISPLAY=:10 wineboot --init >/tmp/wineboot.log 2>&1
-sleep 12
+sleep 15
 
-# Launch installer inside VNC
-echo "    -> Launching mt5setup.exe inside VNC..."
-DISPLAY=:10 \
-    WINEPREFIX=/root/.wine \
-    WINEARCH=win64 \
-    WINEDLLOVERRIDES="mscoree,mshtml=" \
-    WINEDEBUG=-all \
+# Launch mt5setup.exe in VNC
+echo "    -> Launching mt5setup.exe in VNC (complete install in browser)..."
+DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 \
+    WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=-all \
     wine "$SETUP_FILE" >/tmp/mt5-install.log 2>&1 &
 INSTALL_PID=$!
 sleep 5
 
 if kill -0 "$INSTALL_PID" 2>/dev/null; then
-    echo "    -> Installer running (PID $INSTALL_PID)"
+    echo "    -> Installer running PID=$INSTALL_PID — complete in browser"
 else
-    echo "    -> WARNING: Installer exited. Check /tmp/mt5-install.log"
-    echo "    -> Use the xterm in VNC to run manually:"
-    echo "       WINEPREFIX=/root/.wine wine /root/mt5setup.exe"
+    echo "    -> Installer exited. Log: /tmp/mt5-install.log"
 fi
 
-# Write reopen script
-cat > /opt/mt5/open-vnc.sh <<OPENVNC
+# ===========================================================
+# [6] CLEAR RAM CACHE + WRITE HELPER SCRIPTS
+# ===========================================================
+echo ""
+echo "==> [6/6] Clear RAM cache + write helpers"
+
+sync
+echo 3 > /proc/sys/vm/drop_caches
+
+# open-metatester.sh — opens METATESTER64.EXE specifically
+cat > /opt/mt5/open-metatester.sh <<'METASCRIPT'
+#!/bin/bash
+echo "==> Searching for metatester64.exe..."
+MTEST="$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1)"
+
+if [ -z "$MTEST" ]; then
+    echo "ERROR: metatester64.exe not found"
+    echo "Is MetaTrader 5 installed? Run /opt/mt5/open-vnc.sh and install first."
+    find /root/.wine -iname '*.exe' 2>/dev/null | grep -i 'meta\|trade\|tester' || true
+    exit 1
+fi
+
+echo "-> Found: $MTEST"
+
+# Ensure display is running
+if ! pgrep -x Xvfb >/dev/null 2>&1; then
+    echo "-> Starting display..."
+    rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null
+    Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb.log 2>&1 &
+    sleep 4
+    DISPLAY=:10 xsetroot -solid '#1a1f2e'
+    DISPLAY=:10 openbox &
+    sleep 3
+fi
+
+# Kill old VNC
+pkill -9 -f x11vnc    2>/dev/null
+pkill -9 -f websockify 2>/dev/null
+sleep 2
+
+# Start VNC
+x11vnc -display :10 -rfbport 5900 -passwd "mt5vnc" \
+    -forever -shared -noxdamage -noxfixes \
+    -bg -o /tmp/x11vnc.log 2>/dev/null
+sleep 2
+
+websockify -D --web=/usr/share/novnc/ \
+    --cert="/opt/mt5/novnc.pem" \
+    6080 localhost:5900 \
+    >/tmp/websockify.log 2>&1
+sleep 2
+
+# Clear RAM
+sync; echo 3 > /proc/sys/vm/drop_caches
+
+# Launch MetaTester64
+echo "-> Launching metatester64.exe..."
+DISPLAY=:10 \
+    WINEPREFIX=/root/.wine \
+    WINEARCH=win64 \
+    WINEDEBUG=-all \
+    wine "$MTEST" >/tmp/metatester.log 2>&1 &
+
+echo ""
+echo "================================================"
+SIP="$(hostname -I | awk '{print $1}')"
+echo "  https://${SIP}:6080/vnc.html?autoconnect=1"
+echo "  Password: mt5vnc"
+echo "================================================"
+METASCRIPT
+chmod +x /opt/mt5/open-metatester.sh
+
+# open-vnc.sh — reopen VNC with installer if not installed yet
+cat > /opt/mt5/open-vnc.sh <<'VNCSCRIPT'
 #!/bin/bash
 pkill -9 -f x11vnc 2>/dev/null; pkill -9 -f websockify 2>/dev/null
 pkill -9 -f openbox 2>/dev/null; pkill -9 -f Xvfb 2>/dev/null; sleep 2
 rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null
 
-Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb.log 2>&1 &; sleep 4
+Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb.log 2>&1 & sleep 4
 DISPLAY=:10 xsetroot -solid '#1a1f2e'
-DISPLAY=:10 openbox &; sleep 3
+DISPLAY=:10 openbox & sleep 3
 DISPLAY=:10 xterm -geometry 110x35+20+20 -bg '#0d1117' -fg '#00ff88' \
-    -fa 'Monospace' -fs 11 -title "MT5 Shell" &; sleep 2
+    -fa 'Monospace' -fs 11 -title "MT5 Shell" & sleep 2
 
-x11vnc -display :10 -rfbport 5900 -passwd "${VNC_PASS}" \\
-    -forever -shared -noxdamage -noxfixes -bg -o /tmp/x11vnc.log 2>/dev/null; sleep 2
+x11vnc -display :10 -rfbport 5900 -passwd "mt5vnc" \
+    -forever -shared -noxdamage -noxfixes \
+    -bg -o /tmp/x11vnc.log 2>/dev/null; sleep 2
 
-websockify -D --web=/usr/share/novnc/ --cert="/opt/mt5/novnc.pem" \\
+websockify -D --web=/usr/share/novnc/ --cert="/opt/mt5/novnc.pem" \
     6080 localhost:5900 >/tmp/websockify.log 2>&1; sleep 2
 
-MTEST="\$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1)"
-MT5="\$(find /root/.wine -iname 'terminal64.exe' 2>/dev/null | head -1)"
+sync; echo 3 > /proc/sys/vm/drop_caches
 
-if [ -n "\$MTEST" ]; then
-    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all \\
-        wine "\$MTEST" >/tmp/metatester.log 2>&1 &
-    echo "-> Launched metatester64.exe"
-elif [ -n "\$MT5" ]; then
-    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all \\
-        wine "\$MT5" >/tmp/terminal.log 2>&1 &
-    echo "-> Launched terminal64.exe"
-else
-    echo "-> Not installed yet. Use xterm in VNC to run:"
-    echo "   WINEPREFIX=/root/.wine wine /root/mt5setup.exe"
-fi
-
-SIP="\$(hostname -I | awk '{print \$1}')"
-echo "https://\${SIP}:6080/vnc.html?autoconnect=1  |  pw: ${VNC_PASS}"
-OPENVNC
+SIP="$(hostname -I | awk '{print $1}')"
+echo ""
+echo "=========================================="
+echo " https://${SIP}:6080/vnc.html?autoconnect=1"
+echo " Password: mt5vnc"
+echo "=========================================="
+VNCSCRIPT
 chmod +x /opt/mt5/open-vnc.sh
 
-# ===========================================================
-# [6] CLEAR RAM CACHE
-# ===========================================================
-echo ""
-echo "==> [6/6] Clear RAM cache"
+# clear-ram.sh
+cat > /usr/local/bin/clear-ram.sh <<'RAMSCRIPT'
+#!/bin/bash
+echo "Before:"
+free -h | grep -E "Mem|Swap"
 sync
 echo 1 > /proc/sys/vm/drop_caches
 echo 2 > /proc/sys/vm/drop_caches
 echo 3 > /proc/sys/vm/drop_caches
-
-cat > /usr/local/bin/clear-ram.sh <<'RAMCLEAN'
-#!/bin/bash
-sync
-echo 3 > /proc/sys/vm/drop_caches
-echo "RAM cache cleared"
-free -h
-RAMCLEAN
-chmod +x /usr/local/bin/clear-ram.sh
+echo "After:"
 free -h | grep -E "Mem|Swap"
-echo "    -> done"
+echo "Swap:"
+swapon --show 2>/dev/null || echo "(none)"
+RAMSCRIPT
+chmod +x /usr/local/bin/clear-ram.sh
+/usr/local/bin/clear-ram.sh
 
-# ===========================================================
-# DONE
-# ===========================================================
 cat <<DONE
 
 =====================================================
  ALL DONE
 =====================================================
 
- OPEN VNC IN BROWSER:
+ STEP 1 — Install MetaTester in browser:
    https://$SERVER_IP:$NOVNC_PORT/vnc.html?autoconnect=1
    Password : $VNC_PASS
+   Complete the mt5setup.exe installer in the window.
 
- YOU WILL SEE:
-   - Dark desktop (openbox running)
-   - Green xterm terminal (top-left)
-   - MT5 installer window (opens in ~10s)
+ STEP 2 — After install, open MetaTester:
+   /opt/mt5/open-metatester.sh
 
- IF INSTALLER DOES NOT APPEAR:
-   Type this in the green xterm inside VNC:
-   WINEPREFIX=/root/.wine wine /root/mt5setup.exe
-
- REOPEN VNC LATER:
+ REOPEN VNC ONLY (no app):
    /opt/mt5/open-vnc.sh
 
  CLEAR RAM ANYTIME:
    /usr/local/bin/clear-ram.sh
+
+ CHECK SWAP:
+   swapon --show && free -h
 =====================================================
 DONE
