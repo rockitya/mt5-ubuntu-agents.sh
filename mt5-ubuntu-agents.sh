@@ -1,13 +1,11 @@
 #!/bin/bash
-# NO set -e on purpose — we handle errors manually
 export DEBIAN_FRONTEND=noninteractive
 
 # ============================================================
 # MT5 / MetaTester VNC setup
-# - Install Wine + openbox window manager + noVNC
-# - Download mt5setup.exe once from Google Drive (cached)
-# - Start full desktop in noVNC (not headless)
-# - Launch installer INSIDE VNC so you can see and control it
+# - Wine + noVNC + proper desktop (openbox + xterm + background)
+# - Download mt5setup.exe once from Google Drive
+# - Launch installer visibly inside VNC
 # - No agents, no WARP, no ZRAM
 # ============================================================
 
@@ -22,8 +20,6 @@ SETUP_FILE="/root/mt5setup.exe"
 echo "============================================="
 echo " MT5 / MetaTester VNC setup"
 echo " Server : $SERVER_IP"
-echo " noVNC  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
-echo " Pass   : $VNC_PASS"
 echo "============================================="
 
 # ------------------------------------------------------------
@@ -43,7 +39,7 @@ echo "==> [0/6] Removing old setup"
 pkill -9 -f metatester64 2>/dev/null; pkill -9 -f terminal64 2>/dev/null
 pkill -9 -f wineserver   2>/dev/null; pkill -9 -f wine        2>/dev/null
 pkill -9 -f Xvfb         2>/dev/null; pkill -9 -f x11vnc      2>/dev/null
-pkill -9 -f websockify   2>/dev/null
+pkill -9 -f websockify   2>/dev/null; pkill -9 -f openbox     2>/dev/null
 screen -wipe 2>/dev/null
 
 rm -rf /opt/mt5 /root/.wine 2>/dev/null
@@ -51,15 +47,15 @@ rm -f /tmp/.X*-lock 2>/dev/null; rm -rf /tmp/.X11-unix 2>/dev/null
 
 apt-get remove --purge -y \
     winehq-devel winehq-stable winehq-staging wine wine64 wine32 libwine fonts-wine \
-    x11vnc novnc python3-websockify \
-    openbox xterm \
+    x11vnc novnc python3-websockify openbox xterm \
     zram-tools cloudflare-warp \
     2>/dev/null
 apt-get autoremove -y >/dev/null 2>&1
 apt-get autoclean -y >/dev/null 2>&1
 
 swapoff /swapfile 2>/dev/null; swapoff -a 2>/dev/null
-sed -i '\|/swapfile none swap sw 0 0|d' /etc/fstab 2>/dev/null; rm -f /swapfile 2>/dev/null
+sed -i '\|/swapfile none swap sw 0 0|d' /etc/fstab 2>/dev/null
+rm -f /swapfile 2>/dev/null
 
 rm -f /etc/apt/sources.list.d/winehq-*.sources 2>/dev/null
 rm -f /etc/apt/keyrings/winehq-archive.key 2>/dev/null
@@ -80,15 +76,15 @@ systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null
 echo "    -> done"
 
 # ------------------------------------------------------------
-# [2/6] INSTALL WINE + NOVNC + WINDOW MANAGER
+# [2/6] INSTALL ALL TOOLS
 # ------------------------------------------------------------
-echo "==> [2/6] Install Wine + noVNC + openbox window manager"
+echo "==> [2/6] Install Wine + noVNC + desktop tools"
 
 apt-get update -y >/dev/null
 apt-get install -y \
     software-properties-common ca-certificates gnupg2 lsb-release \
     wget curl openssl python3 python3-pip \
-    xvfb screen cabextract \
+    xvfb screen cabextract x11-utils \
     x11vnc novnc python3-websockify \
     openbox xterm \
     net-tools util-linux procps \
@@ -98,7 +94,8 @@ dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings
 UBUNTU_VER="$(lsb_release -cs)"
 
-wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+wget -q -O /etc/apt/keyrings/winehq-archive.key \
+    https://dl.winehq.org/wine-builds/winehq.key
 wget -q -NP /etc/apt/sources.list.d/ \
     "https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_VER}/winehq-${UBUNTU_VER}.sources"
 
@@ -108,7 +105,7 @@ apt-get install -y --install-recommends winehq-devel >/dev/null 2>&1
 echo "    -> $(wine --version)"
 
 # ------------------------------------------------------------
-# [3/6] FIXED 64GB SWAP ONLY
+# [3/6] FIXED 64GB SWAP
 # ------------------------------------------------------------
 echo "==> [3/6] Setup fixed 64GB swap"
 
@@ -135,7 +132,7 @@ free -h | grep -E "Mem|Swap"
 swapon --show
 
 # ------------------------------------------------------------
-# [4/6] DOWNLOAD MT5SETUP.EXE ONCE FROM GOOGLE DRIVE
+# [4/6] DOWNLOAD MT5SETUP.EXE ONCE
 # ------------------------------------------------------------
 echo "==> [4/6] Download mt5setup.exe from Google Drive"
 
@@ -158,7 +155,7 @@ else
     if [ "$FILESIZE" -lt 1000000 ]; then
         echo ""
         echo "ERROR: Google Drive download failed (${FILESIZE} bytes)"
-        echo "Manually upload from your local PC then re-run:"
+        echo "Upload manually from your local PC then re-run:"
         echo "  scp mt5setup.exe root@$SERVER_IP:/root/mt5setup.exe"
         exit 1
     fi
@@ -166,9 +163,9 @@ else
 fi
 
 # ------------------------------------------------------------
-# [5/6] START NOVNC WITH FULL DESKTOP
+# [5/6] START FULL VNC DESKTOP
 # ------------------------------------------------------------
-echo "==> [5/6] Start noVNC desktop"
+echo "==> [5/6] Start VNC desktop"
 
 mkdir -p /opt/mt5
 VNC_CERT="/opt/mt5/novnc.pem"
@@ -177,26 +174,39 @@ openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout "$VNC_CERT" -out "$VNC_CERT" -days 3650 \
     -subj "/CN=$SERVER_IP" >/dev/null 2>&1
 
-# Kill any leftover VNC/display processes
+# Kill any leftovers
 pkill -9 -f x11vnc 2>/dev/null; pkill -9 -f websockify 2>/dev/null
-sleep 1
+pkill -9 -f openbox 2>/dev/null; pkill -9 -f Xvfb 2>/dev/null
+sleep 2
 rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null
 
-# Start virtual display
-Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb-vnc.log 2>&1 &
+# 1. Start virtual display
+Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb.log 2>&1 &
+sleep 4
+
+# 2. Set solid background so desktop is not black
+DISPLAY=:10 xsetroot -solid '#1e2433'
+sleep 1
+
+# 3. Start openbox window manager
+DISPLAY=:10 openbox &
 sleep 3
 
-# Start openbox window manager (so the desktop is usable, not black)
-DISPLAY=:10 openbox-session >/tmp/openbox.log 2>&1 &
+# 4. Open xterm so there is always something visible on desktop
+DISPLAY=:10 xterm -geometry 100x30+10+10 -bg '#0d1117' -fg '#00ff88' \
+    -title "MT5 Terminal" -e "bash --norc" &
 sleep 2
 
-# Start x11vnc
-x11vnc -display :10 -rfbport "$VNC_PORT" -passwd "$VNC_PASS" \
-    -forever -shared -noxdamage -noxfixes -bg \
-    -o /tmp/x11vnc.log 2>/dev/null
+# 5. Start x11vnc
+x11vnc -display :10 \
+    -rfbport "$VNC_PORT" \
+    -passwd "$VNC_PASS" \
+    -forever -shared \
+    -noxdamage -noxfixes \
+    -bg -o /tmp/x11vnc.log 2>/dev/null
 sleep 2
 
-# Start noVNC websocket proxy
+# 6. Start noVNC
 websockify -D \
     --web=/usr/share/novnc/ \
     --cert="$VNC_CERT" \
@@ -204,44 +214,74 @@ websockify -D \
     >/tmp/websockify.log 2>&1
 sleep 2
 
-echo "    -> noVNC desktop running"
+# Verify VNC is up
+VNC_CHECK=$(ss -tuln 2>/dev/null | grep -c ":$VNC_PORT " || echo 0)
+NOVNC_CHECK=$(ss -tuln 2>/dev/null | grep -c ":$NOVNC_PORT " || echo 0)
+echo "    -> x11vnc port $VNC_PORT : $([ "$VNC_CHECK" -gt 0 ] && echo UP || echo FAILED)"
+echo "    -> noVNC  port $NOVNC_PORT : $([ "$NOVNC_CHECK" -gt 0 ] && echo UP || echo FAILED)"
 
 # ------------------------------------------------------------
-# [6/6] LAUNCH INSTALLER INSIDE VNC
+# [6/6] INIT WINE PREFIX + LAUNCH INSTALLER IN VNC
 # ------------------------------------------------------------
-echo "==> [6/6] Launch installer inside VNC"
+echo "==> [6/6] Init Wine + launch installer inside VNC"
 
 export WINEPREFIX=/root/.wine
 export WINEARCH=win64
 export WINEDLLOVERRIDES="mscoree,mshtml="
 export WINEDEBUG=-all
 
-# Init wine prefix first
-DISPLAY=:10 wineboot -u >/dev/null 2>&1 &
-sleep 8
+# Init wine prefix visibly in the xterm
+echo "    -> Initialising Wine prefix (30s)..."
+DISPLAY=:10 wineboot --init >/tmp/wineboot.log 2>&1
+sleep 10
 
-# Launch installer VISIBLY inside VNC — no /auto flag so you can see it
-DISPLAY=:10 wine "$SETUP_FILE" >/tmp/mt5-install.log 2>&1 &
+echo "    -> Launching mt5setup.exe inside VNC..."
+DISPLAY=:10 \
+    WINEPREFIX=/root/.wine \
+    WINEARCH=win64 \
+    WINEDLLOVERRIDES="mscoree,mshtml=" \
+    wine "$SETUP_FILE" >/tmp/mt5-install.log 2>&1 &
 
-echo "    -> Installer launched inside VNC"
-echo "    -> Open your browser to complete setup"
+INSTALL_PID=$!
+echo "    -> Installer PID: $INSTALL_PID"
 
-# Write reopen helper
+sleep 5
+if kill -0 "$INSTALL_PID" 2>/dev/null; then
+    echo "    -> Installer is running — open VNC to see it"
+else
+    echo ""
+    echo "    WARNING: Installer exited immediately"
+    echo "    ---- install log ----"
+    cat /tmp/mt5-install.log 2>/dev/null || true
+    echo ""
+    echo "    You can still use the xterm in VNC to run it manually:"
+    echo "      WINEPREFIX=/root/.wine wine /root/mt5setup.exe"
+fi
+
+# Write reopen script
 cat > /opt/mt5/open-vnc.sh <<OPENVNC
 #!/bin/bash
-pkill -9 -f x11vnc 2>/dev/null
+pkill -9 -f x11vnc   2>/dev/null
 pkill -9 -f websockify 2>/dev/null
+pkill -9 -f openbox  2>/dev/null
+pkill -9 -f Xvfb     2>/dev/null
 sleep 2
 
 rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null
-Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb-vnc.log 2>&1 &
+Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb.log 2>&1 &
+sleep 4
+
+DISPLAY=:10 xsetroot -solid '#1e2433'
+DISPLAY=:10 openbox &
 sleep 3
-DISPLAY=:10 openbox-session >/tmp/openbox.log 2>&1 &
+
+DISPLAY=:10 xterm -geometry 100x30+10+10 -bg '#0d1117' -fg '#00ff88' \
+    -title "MT5 Terminal" -e "bash --norc" &
 sleep 2
 
-x11vnc -display :10 -rfbport 5900 -passwd "$VNC_PASS" \\
-    -forever -shared -noxdamage -noxfixes -bg \\
-    -o /tmp/x11vnc.log 2>/dev/null
+x11vnc -display :10 -rfbport 5900 -passwd "${VNC_PASS}" \\
+    -forever -shared -noxdamage -noxfixes \\
+    -bg -o /tmp/x11vnc.log 2>/dev/null
 sleep 2
 
 websockify -D \\
@@ -255,24 +295,29 @@ MTEST="\$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1)"
 MT5="\$(find /root/.wine -iname 'terminal64.exe' 2>/dev/null | head -1)"
 
 if [ -n "\$MTEST" ]; then
-    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all wine "\$MTEST" >/tmp/metatester-vnc.log 2>&1 &
+    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all \\
+        wine "\$MTEST" >/tmp/metatester.log 2>&1 &
     echo "-> Launched metatester64.exe"
 elif [ -n "\$MT5" ]; then
-    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all wine "\$MT5" >/tmp/terminal-vnc.log 2>&1 &
+    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all \\
+        wine "\$MT5" >/tmp/terminal.log 2>&1 &
     echo "-> Launched terminal64.exe"
 else
-    echo "-> MetaTester not found. Install it from the VNC desktop."
+    echo "-> MetaTester not installed yet"
+    echo "   Run from the xterm in VNC:"
+    echo "   WINEPREFIX=/root/.wine wine /root/mt5setup.exe"
 fi
 
+SIP="\$(hostname -I | awk '{print \$1}')"
 echo ""
 echo "=============================="
-echo " https://\$(hostname -I | awk '{print \$1}'):6080/vnc.html"
-echo " Password: $VNC_PASS"
+echo " https://\${SIP}:6080/vnc.html?autoconnect=1"
+echo " Password: ${VNC_PASS}"
 echo "=============================="
 OPENVNC
 chmod +x /opt/mt5/open-vnc.sh
 
-# RAM cleanup helper
+# RAM cleanup
 cat > /usr/local/bin/clear-ram.sh <<'RAMCLEAN'
 #!/bin/bash
 sync; echo 1 > /proc/sys/vm/drop_caches
@@ -285,18 +330,19 @@ cat <<DONE
 =====================================================
  SETUP COMPLETE
 =====================================================
- Open this in your browser NOW:
-   https://$SERVER_IP:$NOVNC_PORT/vnc.html
+ Open this in your browser NOW (click Connect):
+   https://$SERVER_IP:$NOVNC_PORT/vnc.html?autoconnect=1
    Password: $VNC_PASS
 
- The mt5setup.exe installer is running inside VNC.
- Complete the installation from your browser window.
- You have full mouse + keyboard control.
+ You will see:
+   - Dark blue desktop (openbox)
+   - Green terminal (xterm) in top-left corner
+   - MT5 installer window (should appear in ~10s)
 
- After installation finishes, reopen MetaTester anytime:
+ If installer not visible, type in the xterm:
+   WINEPREFIX=/root/.wine wine /root/mt5setup.exe
+
+ Reopen VNC later:
    /opt/mt5/open-vnc.sh
-
- RAM cleanup:
-   /usr/local/bin/clear-ram.sh
 =====================================================
 DONE
