@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ============================================================
 # MT5 / MetaTester minimal setup
@@ -12,6 +13,7 @@ export DEBIAN_FRONTEND=noninteractive
 # - Install MetaTester
 # - Open MetaTester in noVNC
 # - Add SDE launcher helper
+# - PATH-safe for dpkg/apt in non-interactive shells
 # ============================================================
 
 NOVNC_PORT=6080
@@ -96,18 +98,16 @@ echo "    -> Firewall disabled"
 # ------------------------------------------------------------
 echo "==> [2/8] Check dpkg state"
 
-if ! dpkg --audit >/dev/null 2>&1; then
-    echo "    -> dpkg audit returned non-zero, trying recovery"
-fi
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 if [ -d /var/lib/dpkg/updates ] && [ -n "$(find /var/lib/dpkg/updates -type f 2>/dev/null | head -1)" ]; then
     echo "    -> pending dpkg updates found, running dpkg --configure -a"
-    dpkg --configure -a || true
+    /usr/bin/dpkg --configure -a || true
 fi
 
 if ! apt-get update -y >/dev/null 2>&1; then
     echo "    -> apt metadata check failed, trying package recovery"
-    dpkg --configure -a || true
+    /usr/bin/dpkg --configure -a || true
     apt-get install -f -y || true
     apt --fix-broken install -y || true
 fi
@@ -283,6 +283,7 @@ openssl req -x509 -nodes -newkey rsa:2048 \
 cat > /opt/mt5/open-vnc.sh <<EOF
 #!/bin/bash
 set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 pkill -9 -f x11vnc 2>/dev/null || true
 pkill -9 -f websockify 2>/dev/null || true
@@ -345,6 +346,7 @@ chmod +x /usr/local/bin/clear-ram-cache.sh
 cat > /opt/mt5/run-sde-metatester.sh <<EOF
 #!/bin/bash
 set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 SDE_DIR="/root/sde"
 MTEST_EX="\$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1 || true)"
