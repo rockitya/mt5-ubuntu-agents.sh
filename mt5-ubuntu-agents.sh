@@ -4,19 +4,7 @@ export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # ============================================================
-# MT5 / MetaTester minimal setup
-# - No agents
-# - No WARP
-# - No ZRAM
-# - Fixed 64GB swap
-# - Download mt5setup.exe once from Google Drive
-# - Install MetaTester
-# - Open MetaTester in noVNC
-# - PATH-safe
-# - Galaxy-safe
-# - NO dpkg recovery
-# - No iptables flush
-# - No broad Wine purge
+# MT5 / MetaTester minimal setup - REPAIR EDITION
 # ============================================================
 
 NOVNC_PORT=6080
@@ -33,6 +21,20 @@ echo " MT5 / MetaTester setup"
 echo " Server : $SERVER_IP"
 echo " noVNC  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
 echo "============================================="
+
+# ------------------------------------------------------------
+# [PRE-FLIGHT] FIX DPKG & WAIT FOR LOCKS
+# ------------------------------------------------------------
+echo "==> [PRE] Fixing interrupted package states"
+# Fix interrupted dpkg
+dpkg --configure -a || true
+
+# Wait for other package managers to finish
+echo "    -> Waiting for apt/dpkg locks to release..."
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 ; do
+    sleep 5
+done
+echo "    -> System locks cleared"
 
 # ------------------------------------------------------------
 # [0/7] CLEAN OLD RUNTIME ONLY
@@ -143,8 +145,8 @@ if [ "$FILESIZE" -gt 1000000 ]; then
     echo "    -> Reusing cached mt5setup.exe ($(du -sh "$SETUP_FILE" | cut -f1))"
 else
     echo "    -> Installing gdown"
-    python3 -m pip install --upgrade pip >/dev/null 2>&1 || true
-    python3 -m pip install gdown >/dev/null 2>&1 || true
+    python3 -m pip install --upgrade pip --break-system-packages >/dev/null 2>&1 || true
+    python3 -m pip install gdown --break-system-packages >/dev/null 2>&1 || true
 
     rm -f "$SETUP_FILE" 2>/dev/null || true
 
@@ -214,22 +216,15 @@ MT5_EX="$(find /root/.wine -iname 'terminal64.exe' 2>/dev/null | head -1 || true
 
 if [ "$FOUND" -ne 1 ] && [ -z "$MTEST_EX" ] && [ -z "$MT5_EX" ]; then
     echo "ERROR: Installation not found"
-    echo "---- install log ----"
-    tail -n 100 /tmp/mt5-install.log || true
     exit 1
 fi
-
-[ -n "$MTEST_EX" ] && echo "    -> metatester64.exe found"
-[ -n "$MT5_EX" ] && echo "    -> terminal64.exe found"
 
 # ------------------------------------------------------------
 # [6/7] OPEN IN NOVNC
 # ------------------------------------------------------------
 echo "==> [6/7] Open MetaTester in noVNC"
 
-mkdir -p /opt/mt5
 VNC_CERT="/opt/mt5/novnc.pem"
-
 openssl req -x509 -nodes -newkey rsa:2048 \
     -keyout "$VNC_CERT" -out "$VNC_CERT" -days 3650 \
     -subj "/CN=$SERVER_IP" >/dev/null 2>&1
@@ -247,138 +242,27 @@ rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null || true
 Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb-vnc.log 2>&1 &
 sleep 3
 
-x11vnc -display :10 -rfbport $VNC_PORT -passwd "$VNC_PASS" \
-    -forever -shared -noxdamage -noxfixes -bg \
-    -o /tmp/x11vnc.log 2>/dev/null || true
+x11vnc -display :10 -rfbport $VNC_PORT -passwd "$VNC_PASS" -forever -shared -noxdamage -noxfixes -bg >/dev/null 2>&1
 sleep 2
 
-websockify -D \
-    --web=/usr/share/novnc/ \
-    --cert="$VNC_CERT" \
-    $NOVNC_PORT localhost:$VNC_PORT \
-    >/tmp/websockify.log 2>&1
+websockify -D --web=/usr/share/novnc/ --cert="$VNC_CERT" $NOVNC_PORT localhost:$VNC_PORT >/dev/null 2>&1
 sleep 2
 
 MTEST_EX="\$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1 || true)"
 MT5_EX="\$(find /root/.wine -iname 'terminal64.exe' 2>/dev/null | head -1 || true)"
 
-if [ -n "\$MTEST_EX" ]; then
-    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all wine "\$MTEST_EX" >/tmp/metatester-vnc.log 2>&1 &
-elif [ -n "\$MT5_EX" ]; then
-    DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all wine "\$MT5_EX" >/tmp/terminal-vnc.log 2>&1 &
-else
-    echo "Nothing to open"
-    exit 1
-fi
+DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all wine "\${MTEST_EX:-\$MT5_EX}" >/dev/null 2>&1 &
 
-echo ""
-echo "============================================"
-echo " noVNC running"
-echo "============================================"
-echo " Browser  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
-echo " Password : $VNC_PASS"
-echo "============================================"
+echo "noVNC is live at https://$SERVER_IP:$NOVNC_PORT/vnc.html"
 EOF
 
 chmod +x /opt/mt5/open-vnc.sh
 /opt/mt5/open-vnc.sh
 
 # ------------------------------------------------------------
-# [7/7] CLEAN RAM + SDE LAUNCHER
+# [7/7] FINAL CLEANUP
 # ------------------------------------------------------------
-echo "==> [7/7] Clean RAM + SDE launcher"
+echo "==> [7/7] Finishing up"
+sync && echo 1 > /proc/sys/vm/drop_caches
 
-cat > /usr/local/bin/clear-ram-cache.sh <<'EOF'
-#!/bin/bash
-sync
-echo 1 > /proc/sys/vm/drop_caches
-EOF
-
-chmod +x /usr/local/bin/clear-ram-cache.sh
-/usr/local/bin/clear-ram-cache.sh || true
-
-cat > /opt/mt5/run-sde-metatester.sh <<EOF
-#!/bin/bash
-set -euo pipefail
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-SDE_DIR="/root/sde"
-MTEST_EX="\$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1 || true)"
-VNC_CERT="/opt/mt5/novnc.pem"
-
-echo "Checking SDE installation..."
-if [ ! -f "\$SDE_DIR/sde.exe" ]; then
-    echo "ERROR: Intel SDE not found at \$SDE_DIR/sde.exe"
-    echo ""
-    echo "=== INSTRUCTIONS ==="
-    echo "1. Download: https://www.intel.com/content/www/us/en/download/684897/intel-software-development-emulator.html"
-    echo "2. Get the Windows package with sde.exe"
-    echo "3. Upload it to the server"
-    echo "4. Extract into: \$SDE_DIR"
-    exit 1
-fi
-
-if [ -z "\$MTEST_EX" ]; then
-    echo "ERROR: metatester64.exe not found"
-    exit 1
-fi
-
-echo "SDE found, starting emulator..."
-pkill -9 -f x11vnc 2>/dev/null || true
-pkill -9 -f websockify 2>/dev/null || true
-sleep 2
-
-rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null || true
-Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb-sde.log 2>&1 &
-sleep 3
-
-x11vnc -display :10 -rfbport $VNC_PORT -passwd "$VNC_PASS" -forever -shared -noxdamage -noxfixes -bg -o /tmp/x11vnc-sde.log 2>/dev/null || true
-sleep 2
-
-websockify -D --web=/usr/share/novnc/ --cert="\$VNC_CERT" $NOVNC_PORT localhost:$VNC_PORT >/tmp/websockify-sde.log 2>&1
-sleep 2
-
-export WINEPREFIX=/root/.wine
-export WINEARCH=win64
-export WINEDLLOVERRIDES="mscoree,mshtml="
-export WINEDEBUG=-all
-
-DISPLAY=:10 wine "\$SDE_DIR/sde.exe" -hsw -- "\$MTEST_EX" >/tmp/sde-metatester.log 2>&1 &
-
-echo ""
-echo "============================================"
-echo " SDE + MetaTester running"
-echo "============================================"
-echo " Browser  : https://$SERVER_IP:$NOVNC_PORT/vnc.html?autoconnect=1"
-echo " Password : $VNC_PASS"
-echo " Log      : /tmp/sde-metatester.log"
-echo "============================================"
-EOF
-
-chmod +x /opt/mt5/run-sde-metatester.sh
-
-cat <<DONE
-
-=====================================================
- SETUP COMPLETE
-=====================================================
- Installed:
-   MetaTester / MetaTrader only
-
- Not done:
-   No agents created
-   No agents started
-   No WARP
-   No ZRAM
-
- noVNC:
-   https://$SERVER_IP:$NOVNC_PORT/vnc.html
-   Password: $VNC_PASS
-
- Reopen later:
-   /opt/mt5/open-vnc.sh
-
- Optional SDE launcher:
-   /opt/mt5/run-sde-metatester.sh
-=====================================================
-DONE
+echo "DONE! Access via browser: https://$SERVER_IP:$NOVNC_PORT/vnc.html"
