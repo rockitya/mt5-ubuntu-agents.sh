@@ -3,11 +3,10 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 # ============================================================
-# MT5 + 8 SDE-EMULATED AGENT FARM (Complete Production Setup)
+# MT5 + 8 SDE-EMULATED AGENT FARM (NO APT LOCK CLEARING)
 # - Master MetaTester GUI (noVNC control)
 # - 8 headless agents w/ Intel SDE (HSW,SKX,ICL,SAP,KNL,GLC,SLM,NTM)
 # - 64GB fixed swap, auto-boot systemd services
-# - Auto-downloads latest Intel SDE + MT5 installer
 # ============================================================
 
 NOVNC_PORT=6080
@@ -29,31 +28,26 @@ GDRIVE_URL="https://drive.usercontent.google.com/download?id=1XMi5YbCtyeiJFlSbfl
 SETUP_FILE="/root/mt5setup.exe"
 
 echo "============================================="
-echo " MT5 + 8 SDE-AGENT FARM SETUP (v2.0)"
+echo " MT5 + 8 SDE-AGENT FARM SETUP (NO APT LOCKS)"
 echo " Server : $SERVER_IP"
 echo " Master: https://$SERVER_IP:$NOVNC_PORT/vnc.html"
 echo " Agents: $AGENT_BASE_PORT-$((AGENT_BASE_PORT+AGENT_COUNT-1))"
 echo "============================================="
 
-# ------------------------------------------------------------ 
-# [0/10] FULL CLEANUP (extended)
+# ------------------------------------------------------------
+# [0/10] FULL CLEANUP (NO APT LOCK HANDLING)
 # ------------------------------------------------------------
 echo "==> [0/10] Complete cleanup"
 pkill -9 -f metatester64 tester-agent wine Xvfb x11vnc websockify 2>/dev/null || true
 screen -wipe 2>/dev/null || true
 
 # Kill systemd services
-systemctl stop metatester-agent@* 2>/dev/null || true
-systemctl disable metatester-agent@* 2>/dev/null || true
+systemctl stop metatester-sde-agent@* 2>/dev/null || true
+systemctl disable metatester-sde-agent@* 2>/dev/null || true
 
 # Remove all prefixes and directories
 rm -rf /opt/mt5* "$MASTER_WINEPREFIX" "$AGENT_WINEPREFIX_BASE" "$AGENT_DIR" "$SDE_DIR"
 rm -rf /root/.wine*
-
-# Clear apt locks
-pkill -9 -f apt-get apt dpkg 2>/dev/null || true
-rm -f /var/lib/dpkg/lock* /var/lib/apt/lists/lock /var/cache/apt/archives/lock
-dpkg --configure -a 2>/dev/null || true
 
 # Remove swap
 swapoff /swapfile 2>/dev/null || true
@@ -61,7 +55,7 @@ swapoff -a 2>/dev/null || true
 sed -i '/|\/swapfile/d' /etc/fstab 2>/dev/null || true
 rm -f /swapfile 2>/dev/null || true
 
-# Purge packages
+# Purge packages (no lock handling)
 apt-get remove --purge -y wine* x11vnc novnc python3-websockify 2>/dev/null || true
 apt-get autoremove -y >/dev/null 2>&1 || true
 apt-get autoclean -y >/dev/null 2>&1 || true
@@ -358,7 +352,7 @@ echo "==> Starting master GUI..."
 cat <<DONE
 
 ==============================================
-✅ COMPLETE: 8 SDE-AGENT MT5 FARM READY
+✅ COMPLETE: 8 SDE-AGENT MT5 FARM READY (NO APT LOCKS)
 ==============================================
 MASTER GUI: https://$SERVER_IP:$NOVNC_PORT/vnc.html?autoconnect=1
 VNC Password: $VNC_PASS
