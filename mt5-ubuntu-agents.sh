@@ -1,268 +1,134 @@
 #!/bin/bash
+# ============================================================
+# MT5 / MetaTester - ULTRA-REPAIR & AUTO-INSTALL
+# This version force-clears dpkg locks before starting.
+# ============================================================
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+# ------------------------------------------------------------
+# [CRITICAL] FORCE REPAIR DPKG/APT LOCKS
+# ------------------------------------------------------------
+echo "==> Clearing system locks and repairing package database..."
+
+# 1. Kill any hung apt/dpkg processes
+killall apt apt-get dpkg 2>/dev/null || true
+
+# 2. Force remove lock files
+rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock
+rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock
+
+# 3. Run the repair command
+dpkg --configure -a
+
+# 4. Fix broken dependencies
+apt-get install -f -y
+
+echo "    -> System repaired. Starting MT5 Setup..."
+
+# ------------------------------------------------------------
+# SETTINGS & PATHS
+# ------------------------------------------------------------
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-# ============================================================
-# MT5 / MetaTester minimal setup - REPAIR EDITION
-# ============================================================
-
 NOVNC_PORT=6080
 VNC_PORT=5900
 VNC_PASS="mt5vnc"
 SERVER_IP="$(hostname -I | awk '{print $1}')"
-
-FILE_ID="1XMi5YbCtyeiJFlSbflJjbUFV-sIQI4TC"
-GDRIVE_URL="https://drive.usercontent.google.com/download?id=1XMi5YbCtyeiJFlSbflJjbUFV-sIQI4TC&export=download&authuser=0"
 SETUP_FILE="/root/mt5setup.exe"
-
-echo "============================================="
-echo " MT5 / MetaTester setup"
-echo " Server : $SERVER_IP"
-echo " noVNC  : https://$SERVER_IP:$NOVNC_PORT/vnc.html"
-echo "============================================="
+GDRIVE_URL="https://drive.usercontent.google.com/download?id=1XMi5YbCtyeiJFlSbflJjbUFV-sIQI4TC&export=download&authuser=0"
 
 # ------------------------------------------------------------
-# [PRE-FLIGHT] FIX DPKG & WAIT FOR LOCKS
+# [0/7] CLEAN OLD RUNTIME
 # ------------------------------------------------------------
-echo "==> [PRE] Fixing interrupted package states"
-# Fix interrupted dpkg
-dpkg --configure -a || true
-
-# Wait for other package managers to finish
-echo "    -> Waiting for apt/dpkg locks to release..."
-while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 ; do
-    sleep 5
-done
-echo "    -> System locks cleared"
+echo "==> [0/7] Cleaning old processes..."
+pkill -9 -f "metatester|terminal|wine|Xvfb|x11vnc|websockify" 2>/dev/null || true
+rm -rf /root/.wine /opt/mt5 /tmp/.X* 2>/dev/null || true
 
 # ------------------------------------------------------------
-# [0/7] CLEAN OLD RUNTIME ONLY
+# [1/7] FIREWALL
 # ------------------------------------------------------------
-echo "==> [0/7] Cleaning old runtime only"
-
-pkill -9 -f metatester64 2>/dev/null || true
-pkill -9 -f terminal64 2>/dev/null || true
-pkill -9 -f wineserver 2>/dev/null || true
-pkill -9 -f wine 2>/dev/null || true
-pkill -9 -f Xvfb 2>/dev/null || true
-pkill -9 -f x11vnc 2>/dev/null || true
-pkill -9 -f websockify 2>/dev/null || true
-screen -wipe 2>/dev/null || true
-
-rm -rf /opt/mt5 2>/dev/null || true
-rm -rf /root/.wine 2>/dev/null || true
-rm -f /tmp/.X*-lock 2>/dev/null || true
-rm -rf /tmp/.X11-unix 2>/dev/null || true
-rm -f /opt/mt5/novnc.pem 2>/dev/null || true
-rm -f /etc/sysctl.d/99-mt5.conf 2>/dev/null || true
-
-echo "    -> Runtime cleanup done"
-
-# ------------------------------------------------------------
-# [1/7] DISABLE HIGH-LEVEL FIREWALL ONLY
-# ------------------------------------------------------------
-echo "==> [1/7] Disable high-level firewall only"
-
+echo "==> [1/7] Disabling Firewalls..."
 ufw disable 2>/dev/null || true
 systemctl stop firewalld 2>/dev/null || true
-systemctl disable firewalld 2>/dev/null || true
-
-echo "    -> ufw/firewalld disabled (iptables untouched)"
 
 # ------------------------------------------------------------
-# [2/7] INSTALL WINE + VNC + TOOLS
+# [2/7] INSTALL WINE + TOOLS
 # ------------------------------------------------------------
-echo "==> [2/7] Install Wine + VNC + tools"
-
-apt-get update -y >/dev/null
-apt-get install -y \
-    software-properties-common \
-    ca-certificates \
-    gnupg2 \
-    lsb-release \
-    wget curl openssl \
-    python3 python3-pip \
-    xvfb screen cabextract \
-    x11vnc novnc python3-websockify \
-    net-tools util-linux procps \
-    >/dev/null
+echo "==> [2/7] Installing Wine & VNC Components..."
+apt-get update -y
+apt-get install -y software-properties-common wget curl xvfb x11vnc novnc python3-websockify python3-pip gnupg2 lsb-release
 
 dpkg --add-architecture i386
 mkdir -pm755 /etc/apt/keyrings
 UBUNTU_VER="$(lsb_release -cs)"
+wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+wget -q -NP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_VER}/winehq-${UBUNTU_VER}.sources"
 
-wget -q -O /etc/apt/keyrings/winehq-archive.key \
-    https://dl.winehq.org/wine-builds/winehq.key
-
-wget -q -NP /etc/apt/sources.list.d/ \
-    "https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_VER}/winehq-${UBUNTU_VER}.sources"
-
-apt-get update -y >/dev/null
-apt-get install -y --install-recommends winehq-devel >/dev/null
-
-echo "    -> $(wine --version)"
+apt-get update -y
+apt-get install -y --install-recommends winehq-devel
 
 # ------------------------------------------------------------
-# [3/7] SETUP FIXED 64GB SWAP
+# [3/7] SWAP SETUP (64GB)
 # ------------------------------------------------------------
-echo "==> [3/7] Setup fixed 64GB swap"
-
+echo "==> [3/7] Creating 64GB Swap file (This takes a moment)..."
 swapoff -a 2>/dev/null || true
-sed -i '\|/swapfile none swap sw 0 0|d' /etc/fstab 2>/dev/null || true
-rm -f /swapfile 2>/dev/null || true
-
-if fallocate -l 64G /swapfile 2>/dev/null; then
-    echo "    -> fallocate ok"
-else
-    dd if=/dev/zero of=/swapfile bs=1M count=65536 status=progress
-fi
-
+rm -f /swapfile
+fallocate -l 64G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=65536
 chmod 600 /swapfile
-mkswap /swapfile >/dev/null
-swapon /swapfile
+mkswap /swapfile && swapon /swapfile
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
-cat > /etc/sysctl.d/99-mt5.conf <<'EOF'
-vm.swappiness=10
-vm.vfs_cache_pressure=80
-EOF
-
-sysctl -p /etc/sysctl.d/99-mt5.conf >/dev/null 2>&1 || true
-
-echo "    -> Memory status"
-free -h | grep -E "Mem|Swap"
-swapon --show || true
-
 # ------------------------------------------------------------
-# [4/7] DOWNLOAD MT5SETUP.EXE ONCE FROM GOOGLE DRIVE
+# [4/7] DOWNLOAD MT5
 # ------------------------------------------------------------
-echo "==> [4/7] Download mt5setup.exe from Google Drive"
+echo "==> [4/7] Downloading MT5 Setup..."
+pip3 install gdown --break-system-packages || pip3 install gdown
+gdown --fuzzy "$GDRIVE_URL" -O "$SETUP_FILE" || true
 
-FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
-
-if [ "$FILESIZE" -gt 1000000 ]; then
-    echo "    -> Reusing cached mt5setup.exe ($(du -sh "$SETUP_FILE" | cut -f1))"
-else
-    echo "    -> Installing gdown"
-    python3 -m pip install --upgrade pip --break-system-packages >/dev/null 2>&1 || true
-    python3 -m pip install gdown --break-system-packages >/dev/null 2>&1 || true
-
-    rm -f "$SETUP_FILE" 2>/dev/null || true
-
-    echo "    -> Downloading from Google Drive"
-    gdown --fuzzy "$GDRIVE_URL" -O "$SETUP_FILE" || \
-    gdown "https://drive.google.com/uc?id=${FILE_ID}" -O "$SETUP_FILE" || \
-    gdown "${FILE_ID}" -O "$SETUP_FILE"
-
-    FILESIZE=$(stat -c%s "$SETUP_FILE" 2>/dev/null || echo 0)
-
-    if [ "$FILESIZE" -lt 1000000 ]; then
-        echo "ERROR: Download failed (${FILESIZE} bytes)"
-        exit 1
-    fi
-
-    echo "    -> Downloaded: $(du -sh "$SETUP_FILE" | cut -f1)"
+if [ ! -f "$SETUP_FILE" ] || [ $(stat -c%s "$SETUP_FILE") -lt 100000 ]; then
+    echo "ERROR: Download failed. Using fallback web link..."
+    wget -O "$SETUP_FILE" "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 fi
 
 # ------------------------------------------------------------
-# [5/7] INSTALL METATRADER / METATESTER
+# [5/7] INSTALL MT5
 # ------------------------------------------------------------
-echo "==> [5/7] Install MetaTester"
-
-mkdir -p /opt/mt5
-
+echo "==> [5/7] Installing MT5 into Wine..."
 export WINEPREFIX=/root/.wine
 export WINEARCH=win64
-export WINEDLLOVERRIDES="mscoree,mshtml="
 export WINEDEBUG=-all
 
-rm -f /tmp/.X90-lock /tmp/.X11-unix/X90 2>/dev/null || true
-Xvfb :90 -screen 0 1280x900x24 >/tmp/xvfb-install.log 2>&1 &
-XVFB_PID=$!
+Xvfb :99 -screen 0 1280x1024x24 &
 sleep 3
-
-DISPLAY=:90 wineboot -u >/dev/null 2>&1
-sleep 5
-
-echo "    -> Running installer"
-DISPLAY=:90 wine "$SETUP_FILE" /auto >/tmp/mt5-install.log 2>&1 &
-INSTALL_PID=$!
-
-FOUND=0
-for i in {1..120}; do
-    MTEST_EX="$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1 || true)"
-    MT5_EX="$(find /root/.wine -iname 'terminal64.exe' 2>/dev/null | head -1 || true)"
-
-    if [ -n "$MTEST_EX" ] || [ -n "$MT5_EX" ]; then
-        FOUND=1
-        echo "    -> Installation files detected after $((i*5))s"
-        sleep 10
-        break
-    fi
-
-    echo "    ...Installing ($((i*5))s / 600s)"
-    sleep 5
-done
-
-kill "$INSTALL_PID" 2>/dev/null || true
-wait "$INSTALL_PID" 2>/dev/null || true
-kill "$XVFB_PID" 2>/dev/null || true
-wait "$XVFB_PID" 2>/dev/null || true
-rm -f /tmp/.X90-lock /tmp/.X11-unix/X90 2>/dev/null || true
-
-MTEST_EX="$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1 || true)"
-MT5_EX="$(find /root/.wine -iname 'terminal64.exe' 2>/dev/null | head -1 || true)"
-
-if [ "$FOUND" -ne 1 ] && [ -z "$MTEST_EX" ] && [ -z "$MT5_EX" ]; then
-    echo "ERROR: Installation not found"
-    exit 1
-fi
+DISPLAY=:99 wine "$SETUP_FILE" /auto &
+sleep 60
+pkill -9 wine 2>/dev/null || true
 
 # ------------------------------------------------------------
-# [6/7] OPEN IN NOVNC
+# [6/7] START NOVNC SERVICE
 # ------------------------------------------------------------
-echo "==> [6/7] Open MetaTester in noVNC"
-
+echo "==> [6/7] Starting GUI Services..."
+mkdir -p /opt/mt5
 VNC_CERT="/opt/mt5/novnc.pem"
-openssl req -x509 -nodes -newkey rsa:2048 \
-    -keyout "$VNC_CERT" -out "$VNC_CERT" -days 3650 \
-    -subj "/CN=$SERVER_IP" >/dev/null 2>&1
+openssl req -x509 -nodes -newkey rsa:2048 -keyout "$VNC_CERT" -out "$VNC_CERT" -days 365 -subj "/CN=MT5"
 
-cat > /opt/mt5/open-vnc.sh <<EOF
+# Create the launch script
+cat > /opt/mt5/start.sh <<EOF
 #!/bin/bash
-set -euo pipefail
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-pkill -9 -f x11vnc 2>/dev/null || true
-pkill -9 -f websockify 2>/dev/null || true
+Xvfb :10 -screen 0 1280x900x24 &
 sleep 2
-
-rm -f /tmp/.X10-lock /tmp/.X11-unix/X10 2>/dev/null || true
-Xvfb :10 -screen 0 1280x900x24 >/tmp/xvfb-vnc.log 2>&1 &
-sleep 3
-
-x11vnc -display :10 -rfbport $VNC_PORT -passwd "$VNC_PASS" -forever -shared -noxdamage -noxfixes -bg >/dev/null 2>&1
+x11vnc -display :10 -rfbport $VNC_PORT -passwd "$VNC_PASS" -forever -bg
+websockify -D --web=/usr/share/novnc/ --cert="$VNC_CERT" $NOVNC_PORT localhost:$VNC_PORT
 sleep 2
-
-websockify -D --web=/usr/share/novnc/ --cert="$VNC_CERT" $NOVNC_PORT localhost:$VNC_PORT >/dev/null 2>&1
-sleep 2
-
-MTEST_EX="\$(find /root/.wine -iname 'metatester64.exe' 2>/dev/null | head -1 || true)"
-MT5_EX="\$(find /root/.wine -iname 'terminal64.exe' 2>/dev/null | head -1 || true)"
-
-DISPLAY=:10 WINEPREFIX=/root/.wine WINEARCH=win64 WINEDEBUG=-all wine "\${MTEST_EX:-\$MT5_EX}" >/dev/null 2>&1 &
-
-echo "noVNC is live at https://$SERVER_IP:$NOVNC_PORT/vnc.html"
+MTEST_EX=\$(find /root/.wine -iname 'metatester64.exe' | head -1)
+DISPLAY=:10 wine "\$MTEST_EX"
 EOF
 
-chmod +x /opt/mt5/open-vnc.sh
-/opt/mt5/open-vnc.sh
+chmod +x /opt/mt5/start.sh
+nohup /opt/mt5/start.sh > /dev/null 2>&1 &
 
-# ------------------------------------------------------------
-# [7/7] FINAL CLEANUP
-# ------------------------------------------------------------
-echo "==> [7/7] Finishing up"
-sync && echo 1 > /proc/sys/vm/drop_caches
-
-echo "DONE! Access via browser: https://$SERVER_IP:$NOVNC_PORT/vnc.html"
+echo "===================================================="
+echo " SETUP FINISHED"
+echo " URL: https://$SERVER_IP:$NOVNC_PORT/vnc.html"
+echo " Password: $VNC_PASS"
+echo "===================================================="
